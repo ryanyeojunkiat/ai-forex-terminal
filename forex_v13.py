@@ -1989,9 +1989,16 @@ def render_trade_tracker(symbol, current_price, a=None, td_key=""):
         # Try to use analysis for defaults
         default_dir = a.get("direction","Buy") if a else "Buy"
         default_entry= float(current_price)
-        default_sl   = float(a.get("sl", current_price)) if a else float(current_price)
-        default_tp1  = float(a.get("tp1",current_price)) if a else float(current_price)
-        default_tp2  = float(a.get("tp2",current_price)) if a else float(current_price)
+        # Recalculate levels using live price to prevent wrong-side SL/TP
+        if a and abs(float(current_price) - a.get("close", current_price)) > a.get("atr", 1) * 0.3:
+            _tracker_lvl = compute_levels(float(current_price), default_dir, a.get("atr", 0.001), symbol, df=a.get("df"))
+            default_sl  = float(_tracker_lvl["sl"])
+            default_tp1 = float(_tracker_lvl["tp1"])
+            default_tp2 = float(_tracker_lvl["tp2"])
+        else:
+            default_sl   = float(a.get("sl", current_price)) if a else float(current_price)
+            default_tp1  = float(a.get("tp1",current_price)) if a else float(current_price)
+            default_tp2  = float(a.get("tp2",current_price)) if a else float(current_price)
 
         c1,c2 = st.columns(2)
         me  = c1.number_input("Entry",     value=default_entry, format=f"%.{cfg(symbol)['dec']}f", key=f"te_e_{symbol}")
@@ -2403,6 +2410,17 @@ def page_symbol(symbol):
     # MT5 live price
     tick  = fetch_mt5_price(symbol, get_ma_token(), get_ma_account())
     price = tick["bid"] if tick else a["close"]
+
+    # ── Recalculate SL/TP if live price differs from cached close ──
+    # This prevents SL/TP from being on the wrong side when price moves
+    _price_drift = abs(price - a["close"])
+    if _price_drift > a["atr"] * 0.3:  # Significant price change since cache
+        _live_levels = compute_levels(price, a["direction"], a["atr"], symbol, df=a["df"])
+        a["sl"]   = _live_levels["sl"]
+        a["tp1"]  = _live_levels["tp1"]
+        a["tp2"]  = _live_levels["tp2"]
+        a["rr"]   = _live_levels["rr"]
+        a["sl_d"] = _live_levels["sl_d"]
 
     # ── Top bar ──────────────────────────────────────────────
     t1, t2, t3, t4 = st.columns([2,3,2,1])
@@ -2941,29 +2959,39 @@ def page_backtest():
                     trailing_sl = close + (atr * 0.1 if direction == "Buy" else -atr * 0.1)
                     moved_to_be = True
 
-            # Stage 2: Active trailing at 75% of TP1 — trail by 0.5× ATR
+            # Stage 2: Active trailing at 75% of TP1 — trail by 0.7× ATR (wider to let trades run)
             if not trailing_active and moved_to_be:
                 if (direction == "Buy" and fh >= trail_level) or (direction == "Sell" and fl <= trail_level):
                     trailing_active = True
 
             if trailing_active:
                 if direction == "Buy":
-                    new_trail = best_price - atr * 0.5
+                    new_trail = best_price - atr * 0.7
                     trailing_sl = max(trailing_sl, new_trail)
                 else:
-                    new_trail = best_price + atr * 0.5
+                    new_trail = best_price + atr * 0.7
                     trailing_sl = min(trailing_sl, new_trail)
 
-            # Check SL hit
+            # Check SL hit — profitable trailing exits count as Win
             if direction == "Buy":
                 if fl <= trailing_sl:
-                    result = "Loss" if not moved_to_be else "BE"
+                    if not moved_to_be:
+                        result = "Loss"
+                    elif trailing_sl > close + atr * 0.05:
+                        result = "Win"  # Profitable trailing stop = Win
+                    else:
+                        result = "BE"
                     exit_price = trailing_sl; exit_i = j; break
                 if fh >= tp1:
                     result = "Win"; exit_price = tp1; exit_i = j; break
             else:
                 if fh >= trailing_sl:
-                    result = "Loss" if not moved_to_be else "BE"
+                    if not moved_to_be:
+                        result = "Loss"
+                    elif trailing_sl < close - atr * 0.05:
+                        result = "Win"  # Profitable trailing stop = Win
+                    else:
+                        result = "BE"
                     exit_price = trailing_sl; exit_i = j; break
                 if fl <= tp1:
                     result = "Win"; exit_price = tp1; exit_i = j; break
