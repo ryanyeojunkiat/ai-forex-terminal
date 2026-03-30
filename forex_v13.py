@@ -2173,11 +2173,12 @@ def page_symbol(symbol):
     st.markdown(f"<div style='font-family:Space Mono,monospace;font-size:16px;color:#00d4aa;letter-spacing:.1em;padding:4px 0 12px;'>◈ {cfg_['name']} — {symbol}</div>", unsafe_allow_html=True)
     st.markdown(f"<div style='font-size:11px;color:#8b9ab0;margin-bottom:12px;font-family:Space Mono,monospace;'>{cfg_['note']}</div>", unsafe_allow_html=True)
 
-    # Interval selector
+    # Interval selector — Gold defaults to 5 Min for scalping
+    _default_int = 0 if norm(symbol) == "XAUUSD" else 1
     int_col, _, __ = st.columns([1,2,2])
     with int_col:
         int_label = st.selectbox("Interval", list(INTERVAL_OPTIONS.keys()),
-                                 index=1, key=f"int_{symbol}")
+                                 index=_default_int, key=f"int_{symbol}")
     interval = INTERVAL_OPTIONS[int_label]
     bars = 400
 
