@@ -1194,6 +1194,22 @@ def compute_levels(entry, direction, atr, symbol, df=None):
     else:
         tp2 = tp1 - tp2_extra
 
+    # ── Safety check: ensure SL/TP on correct side ─────────
+    if direction == "Buy":
+        if sl >= entry:   # SL must be BELOW entry for Buy
+            sl = entry - sl_d
+        if tp1 <= entry:  # TP1 must be ABOVE entry for Buy
+            tp1 = entry + atr * c["atr_tp1"]
+            tp1_d = tp1 - entry
+            tp2 = tp1 + tp2_extra
+    else:
+        if sl <= entry:   # SL must be ABOVE entry for Sell
+            sl = entry + sl_d
+        if tp1 >= entry:  # TP1 must be BELOW entry for Sell
+            tp1 = entry - atr * c["atr_tp1"]
+            tp1_d = entry - tp1
+            tp2 = tp1 - tp2_extra
+
     rr = tp1_d / sl_d if sl_d > 0 else 0
     return {"sl":sl,"tp1":tp1,"tp2":tp2,"sl_d":sl_d,"tp1_d":tp1_d,"rr":rr}
 
@@ -1315,6 +1331,210 @@ def spike_adjusted_levels(entry, direction, atr, symbol, spike_info, df=None):
 
     return lvl
 
+# ============================================================
+# GOLD ENGINE — Professional XAUUSD Trading System
+# ============================================================
+def _gold_asian_range(df):
+    """
+    Calculate Asian session range (00:00-08:00 UTC).
+    Returns dict: {high, low, range, valid}
+    """
+    if "time" not in df.columns or len(df) < 20:
+        return {"high": 0, "low": 0, "range": 0, "valid": False}
+
+    try:
+        times = pd.to_datetime(df["time"], utc=True)
+    except Exception:
+        return {"high": 0, "low": 0, "range": 0, "valid": False}
+
+    today = times.iloc[-1].normalize()
+    asian_mask = (times >= today) & (times.dt.hour < 8)
+    asian_bars = df.loc[asian_mask]
+
+    if len(asian_bars) < 3:
+        # Try yesterday's Asian session
+        yesterday = today - pd.Timedelta(days=1)
+        asian_mask = (times >= yesterday) & (times < today) & (times.dt.hour < 8)
+        asian_bars = df.loc[asian_mask]
+
+    if len(asian_bars) < 3:
+        return {"high": 0, "low": 0, "range": 0, "valid": False}
+
+    ah = float(asian_bars["high"].max())
+    al = float(asian_bars["low"].min())
+    return {"high": ah, "low": al, "range": ah - al, "valid": True}
+
+def _gold_breakout_signal(df, asian_range, atr):
+    """
+    Detect London breakout of Asian range.
+    Returns: "bull_breakout" | "bear_breakout" | "inside" | "invalid"
+    """
+    if not asian_range["valid"] or asian_range["range"] == 0:
+        return "invalid"
+
+    close = float(df.iloc[-1]["close"])
+    ah = asian_range["high"]
+    al = asian_range["low"]
+
+    # Need clear breakout (at least 0.3× ATR beyond range)
+    margin = atr * 0.3
+    if close > ah + margin:
+        return "bull_breakout"
+    elif close < al - margin:
+        return "bear_breakout"
+    return "inside"
+
+def _gold_liquidity_sweep(df, atr, lookback=30):
+    """
+    Detect liquidity sweep: price spikes beyond recent high/low then reverses.
+    This is a classic institutional pattern.
+    Returns: {"detected": bool, "direction": "bull"/"bear", "sweep_level": float}
+    """
+    if len(df) < lookback + 5:
+        return {"detected": False, "direction": None, "sweep_level": 0}
+
+    recent = df.iloc[-(lookback+5):-5]
+    last5  = df.iloc[-5:]
+
+    recent_high = float(recent["high"].max())
+    recent_low  = float(recent["low"].min())
+    last_high   = float(last5["high"].max())
+    last_low    = float(last5["low"].min())
+    close       = float(df.iloc[-1]["close"])
+
+    sweep_margin = atr * 0.5
+
+    # Bearish sweep: price spiked ABOVE recent high then closed back below → sell signal
+    if last_high > recent_high + sweep_margin and close < recent_high:
+        return {"detected": True, "direction": "bear", "sweep_level": recent_high}
+
+    # Bullish sweep: price spiked BELOW recent low then closed back above → buy signal
+    if last_low < recent_low - sweep_margin and close > recent_low:
+        return {"detected": True, "direction": "bull", "sweep_level": recent_low}
+
+    return {"detected": False, "direction": None, "sweep_level": 0}
+
+def _gold_momentum_filter(df, direction):
+    """
+    Gold-specific momentum: checks multiple timeframe momentum alignment.
+    Returns bonus score (0-15).
+    """
+    if len(df) < 50:
+        return 0
+
+    close = float(df.iloc[-1]["close"])
+    # Short-term momentum (5 bars)
+    c5 = float(df.iloc[-6]["close"])
+    mom5 = close - c5
+    # Medium momentum (20 bars)
+    c20 = float(df.iloc[-21]["close"])
+    mom20 = close - c20
+
+    score = 0
+    if direction == "Sell":
+        if mom5 < 0:  score += 5   # short-term bearish
+        if mom20 < 0: score += 5   # medium bearish
+        # Acceleration: momentum increasing
+        if mom5 < mom20 * 0.3: score += 5
+    else:  # Buy
+        if mom5 > 0:  score += 5
+        if mom20 > 0: score += 5
+        if mom5 > mom20 * 0.3: score += 5
+
+    return score
+
+def gold_engine_score(df, df_h4, direction, base_score, base_grade):
+    """
+    Gold-specific scoring overlay. Adds professional gold trading filters
+    on top of the base signal score.
+    Returns: (adjusted_score, gold_info_dict, adjusted_grade, extra_warns)
+    """
+    row   = df.iloc[-1]
+    atr   = float(row.get("atr14", 0.001) or 0.001)
+    close = float(row["close"])
+    c = cfg("XAUUSD")
+    extra_warns = []
+    gold_info = {}
+    bonus = 0
+
+    # 1. Asian Range Breakout
+    asian = _gold_asian_range(df)
+    gold_info["asian_range"] = asian
+    if asian["valid"]:
+        breakout = _gold_breakout_signal(df, asian, atr)
+        gold_info["breakout"] = breakout
+        if breakout == "bear_breakout" and direction == "Sell":
+            bonus += 10
+            gold_info["breakout_aligned"] = True
+        elif breakout == "bull_breakout" and direction == "Buy":
+            bonus += 10
+            gold_info["breakout_aligned"] = True
+        elif breakout == "inside":
+            bonus -= 5
+            extra_warns.append("⚠ Gold inside Asian range — wait for breakout")
+            gold_info["breakout_aligned"] = False
+        else:
+            gold_info["breakout_aligned"] = False
+    else:
+        gold_info["breakout"] = "no_data"
+        gold_info["breakout_aligned"] = False
+
+    # 2. Liquidity Sweep Detection
+    sweep = _gold_liquidity_sweep(df, atr)
+    gold_info["sweep"] = sweep
+    if sweep["detected"]:
+        if sweep["direction"] == "bear" and direction == "Sell":
+            bonus += 10
+            extra_warns.append(f"🏦 Liquidity sweep detected above {sweep['sweep_level']:.2f} — institutional sell signal")
+        elif sweep["direction"] == "bull" and direction == "Buy":
+            bonus += 10
+            extra_warns.append(f"🏦 Liquidity sweep detected below {sweep['sweep_level']:.2f} — institutional buy signal")
+        elif sweep["direction"] != direction.lower()[:4]:
+            bonus -= 10
+            extra_warns.append(f"⚠ Liquidity sweep opposes your direction — caution")
+
+    # 3. Gold Momentum Filter
+    mom_bonus = _gold_momentum_filter(df, direction)
+    gold_info["momentum_bonus"] = mom_bonus
+    bonus += mom_bonus
+
+    # 4. Session Filter — Gold performs best at London/NY overlap
+    sess_name = get_session_now()
+    if "Overlap" in sess_name:
+        bonus += 5
+        gold_info["session_quality"] = "prime"
+    elif "London" in sess_name or "NewYork" in sess_name:
+        bonus += 2
+        gold_info["session_quality"] = "good"
+    elif "Asian" in sess_name:
+        bonus -= 5
+        gold_info["session_quality"] = "range"
+        extra_warns.append("⚠ Gold Asian session — range-bound, avoid breakout trades")
+    else:
+        gold_info["session_quality"] = "off"
+
+    # 5. Overextension check for gold
+    if len(df) >= 20:
+        c20 = float(df.iloc[-20]["close"])
+        move_20 = abs(close - c20)
+        if move_20 > atr * 4:
+            bonus -= 10
+            extra_warns.append(f"⚠ Gold overextended: moved {move_20:.2f} in 20 bars ({move_20/atr:.1f}× ATR)")
+
+    # Calculate adjusted score
+    adjusted_score = min(100, max(0, base_score + bonus))
+    gold_info["bonus"] = bonus
+    gold_info["adjusted_score"] = adjusted_score
+
+    # Re-grade with adjusted score
+    if   adjusted_score >= c["grade_aplus"]: adjusted_grade = "A+"
+    elif adjusted_score >= c["grade_a"]:    adjusted_grade = "A"
+    elif adjusted_score >= c["grade_b"]:    adjusted_grade = "B"
+    elif adjusted_score >= 45:              adjusted_grade = "C"
+    else:                                   adjusted_grade = "D"
+
+    return adjusted_score, gold_info, adjusted_grade, extra_warns
+
 def compute_lot(balance, risk_pct, sl_pips, symbol):
     pip_val = {"USDJPY":9.1,"GBPJPY":9.1,"EURJPY":9.1,
                "XAUUSD":10.0,"XTIUSD":10.0,
@@ -1344,6 +1564,14 @@ def analyze_symbol(symbol, interval, bars, td_key):
 
     score, bd, grade, warns = score_signal(df, df_h4, symbol, direction)
 
+    # ── Gold Engine overlay (XAUUSD only) ─────────────────────
+    gold_info = {}
+    if norm(symbol) == "XAUUSD":
+        score, gold_info, grade, gold_warns = gold_engine_score(
+            df, df_h4, direction, score, grade)
+        warns.extend(gold_warns)
+        bd["Gold Engine"] = gold_info.get("bonus", 0)
+
     # ── Spike detection (same engine as backtest) ─────────────
     spike_info = detect_spike(df, atr, symbol, lookback=5)
     if spike_info["is_spike"]:
@@ -1366,6 +1594,7 @@ def analyze_symbol(symbol, interval, bars, td_key):
         "session": sess_name, "session_ok": sess_ok_,
         "h4_trend": _h4_trend(df_h4),
         "spike": spike_info,
+        "gold": gold_info,
         "error": None,
     }
 
@@ -2012,6 +2241,43 @@ def page_symbol(symbol):
             f"| Body: {sp_info.get('body_ratio',0)*100:.0f}% | Dir: {sp_info['direction']}</span></div>",
             unsafe_allow_html=True)
 
+    # ── Gold Engine Panel (XAUUSD only) ────────────────────────
+    gi = a.get("gold", {})
+    if gi and norm(symbol) == "XAUUSD":
+        ar = gi.get("asian_range", {})
+        bo = gi.get("breakout", "no_data")
+        sw = gi.get("sweep", {})
+        sq = gi.get("session_quality", "off")
+        bonus = gi.get("bonus", 0)
+
+        bo_col = "#10b981" if gi.get("breakout_aligned") else ("#f59e0b" if bo == "inside" else "#8b9ab0")
+        bo_text = {"bull_breakout": "▲ BULL Breakout", "bear_breakout": "▼ BEAR Breakout",
+                   "inside": "◈ Inside Range", "invalid": "— No Data", "no_data": "— No Data"}.get(bo, bo)
+        _sw_lvl = f"{sw.get('sweep_level', 0):.2f}"
+        sw_text = f"🏦 {sw['direction'].upper()} sweep @ {_sw_lvl}" if sw.get("detected") else "— None detected"
+        sq_col = "#10b981" if sq == "prime" else ("#84cc16" if sq == "good" else ("#f59e0b" if sq == "range" else "#8b9ab0"))
+        sq_text = {"prime": "★ PRIME (Overlap)", "good": "● Good", "range": "◐ Range (Asian)", "off": "○ Off-peak"}.get(sq, sq)
+        b_col = "#10b981" if bonus > 0 else ("#ef4444" if bonus < 0 else "#8b9ab0")
+
+        st.markdown(
+            f"<div style='background:rgba(255,215,0,0.04);border:1px solid rgba(255,215,0,0.15);"
+            f"border-radius:8px;padding:12px 14px;margin:8px 0;'>"
+            f"<div style='font-size:10px;color:#ffd700;font-family:Space Mono,monospace;"
+            f"letter-spacing:.1em;margin-bottom:8px;'>🥇 GOLD ENGINE</div>"
+            f"<div style='display:flex;gap:12px;font-size:11px;flex-wrap:wrap;'>"
+            f"<div><span style='color:#8b9ab0;'>Asian Range: </span>"
+            f"<span style='color:#e8edf2;'>{(str(round(ar['low'],2)) + ' — ' + str(round(ar['high'],2))) if ar.get('valid') else 'N/A'}</span></div>"
+            f"<div><span style='color:#8b9ab0;'>Breakout: </span>"
+            f"<span style='color:{bo_col};font-weight:700;'>{bo_text}</span></div>"
+            f"<div><span style='color:#8b9ab0;'>Sweep: </span>"
+            f"<span style='color:#e8edf2;'>{sw_text}</span></div>"
+            f"<div><span style='color:#8b9ab0;'>Session: </span>"
+            f"<span style='color:{sq_col};'>{sq_text}</span></div>"
+            f"<div><span style='color:#8b9ab0;'>Score Adj: </span>"
+            f"<span style='color:{b_col};font-weight:700;'>{bonus:+d} pts</span></div>"
+            f"</div></div>",
+            unsafe_allow_html=True)
+
     # ── KPI cards — mobile-friendly 2-row grid ────────────────
     def kpi(lbl, val, col="#e8edf2"):
         return (f"<div style='background:#0d1117;border:1px solid rgba(255,255,255,0.08);border-radius:8px;"
@@ -2392,6 +2658,13 @@ def page_backtest():
             i += 1; continue
 
         score, bd, grade, warns = score_signal(df_sl, df_h4, bt_sym, direction)
+
+        # ── Gold Engine overlay for XAUUSD ────────────────────
+        if norm(bt_sym) == "XAUUSD":
+            score, _gi, grade, _gw = gold_engine_score(
+                df_sl, df_h4, direction, score, grade)
+            warns.extend(_gw)
+
         if grade not in allowed_grades:
             i += 1; continue
         if any("OPPOSES" in w for w in warns):
