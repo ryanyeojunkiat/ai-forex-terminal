@@ -1192,12 +1192,12 @@ def _gold_structure_check(df, direction):
         # Higher highs AND higher lows
         hh = highs[-1] > highs[-2]
         hl = lows[-1] > lows[-2]
-        return hh or hl
+        return hh and hl
     else:
         # Lower highs AND lower lows
         lh = highs[-1] < highs[-2]
         ll = lows[-1] < lows[-2]
-        return lh or ll
+        return lh and ll
 
 def _gold_direction(df, df_h4):
     """
@@ -2016,15 +2016,24 @@ def render_trade_tracker(symbol, current_price, a=None, td_key=""):
         if not tp1_ok: st.warning(f"⚠ TP1 is on wrong side for {md}")
 
         if st.button("▶ Enter Trade", key=f"btn_enter_{symbol}"):
-            grade_lock = a.get("grade","?") if a else "?"
-            score_lock = a.get("score",0)   if a else 0
-            sess_lock  = a.get("session","?") if a else "?"
-            st.session_state.active_trades.append({
-                "id": str(uuid.uuid4())[:8], "symbol": symbol,
-                "entry":me,"sl":ms,"direction":md,"lot":ml,"tp1":mt1,"tp2":mt2,
-                "locked_grade":grade_lock,"locked_score":score_lock,"session":sess_lock,
-            })
-            st.success(f"Trade entered: {symbol} {md}"); st.rerun()
+            # ── Validate trade before saving ──────────────────
+            _valid = True
+            if md == "Buy":
+                if ms >= me: st.error("SL must be BELOW entry for Buy"); _valid = False
+                if mt1 <= me: st.error("TP1 must be ABOVE entry for Buy"); _valid = False
+            else:
+                if ms <= me: st.error("SL must be ABOVE entry for Sell"); _valid = False
+                if mt1 >= me: st.error("TP1 must be BELOW entry for Sell"); _valid = False
+            if _valid:
+                grade_lock = a.get("grade","?") if a else "?"
+                score_lock = a.get("score",0)   if a else 0
+                sess_lock  = a.get("session","?") if a else "?"
+                st.session_state.active_trades.append({
+                    "id": str(uuid.uuid4())[:8], "symbol": symbol,
+                    "entry":me,"sl":ms,"direction":md,"lot":ml,"tp1":mt1,"tp2":mt2,
+                    "locked_grade":grade_lock,"locked_score":score_lock,"session":sess_lock,
+                })
+                st.success(f"Trade entered: {symbol} {md}"); st.rerun()
 
     # ── Active trade cards ──
     if not sym_trades:
@@ -2860,6 +2869,16 @@ def page_backtest():
     is_gold = norm(bt_sym) == "XAUUSD"
     COOLDOWN_BARS = 15 if is_gold else 8  # Gold needs more cooldown
     OVEREXT_THRESH = 2.0 if is_gold else 3.0  # Stricter for gold
+
+    # ── Precompute H4 time index to prevent lookahead bias ────
+    h4_times = None
+    raw_times = None
+    try:
+        h4_times = pd.to_datetime(df_h4["time"], utc=True)
+        raw_times = pd.to_datetime(df_raw["time"], utc=True)
+    except Exception:
+        pass  # Fallback: use full df_h4 (no time column)
+
     i = 200
 
     while i < len(df_raw)-1:
@@ -2877,7 +2896,16 @@ def page_backtest():
             consecutive_losses = 0
             i += COOLDOWN_BARS; continue  # Skip more bars after loss streak
 
-        direction = determine_direction(df_sl, df_h4, bt_sym)
+        # ── Slice H4 to prevent lookahead bias ────────────────
+        df_h4_sync = df_h4
+        if h4_times is not None and raw_times is not None:
+            current_time = raw_times.iloc[i]
+            h4_mask = h4_times <= current_time
+            h4_cutoff = h4_mask.sum()
+            if h4_cutoff >= 50:
+                df_h4_sync = df_h4.iloc[:h4_cutoff]
+
+        direction = determine_direction(df_sl, df_h4_sync, bt_sym)
         if direction == "Wait":
             i += 1; continue
 
@@ -2885,12 +2913,12 @@ def page_backtest():
         if _is_overextended(df_sl, direction, atr, threshold=OVEREXT_THRESH):
             i += 1; continue
 
-        score, bd, grade, warns = score_signal(df_sl, df_h4, bt_sym, direction)
+        score, bd, grade, warns = score_signal(df_sl, df_h4_sync, bt_sym, direction)
 
         # ── Gold Engine overlay for XAUUSD ────────────────────
         if norm(bt_sym) == "XAUUSD":
             score, _gi, grade, _gw = gold_engine_score(
-                df_sl, df_h4, direction, score, grade)
+                df_sl, df_h4_sync, direction, score, grade)
             warns.extend(_gw)
 
         if grade not in allowed_grades:
