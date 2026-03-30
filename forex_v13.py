@@ -420,8 +420,8 @@ SYMBOL_CONFIG: Dict[str, Dict] = {
                    sessions=["London","Overlap","Asian"], asset_class="forex",
                    note="Carry trade pair. Strong trends."),
     # ── GOLD ───────────────────────────────────────────────────
-    "XAUUSD": dict(name="Gold",     pip=0.1,    dec=2, atr_sl=1.2, atr_tp1=1.8, atr_tp2=3.0,
-                   grade_aplus=90, grade_a=80, grade_b=65, min_rr=1.3,
+    "XAUUSD": dict(name="Gold",     pip=0.1,    dec=2, atr_sl=1.0, atr_tp1=1.2, atr_tp2=2.0,
+                   grade_aplus=90, grade_a=80, grade_b=65, min_rr=1.0,
                    sessions=["London","Overlap","NewYork"], asset_class="gold",
                    note="Scalping mode. Tight SL, fast TP. Best London/NY overlap."),
     # ── CRUDE OIL ──────────────────────────────────────────────
