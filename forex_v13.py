@@ -1863,7 +1863,7 @@ def page_overview():
         is_open, mkt = market_is_open(sym)
         with cols[i % 3]:
             with st.spinner(f"Loading {sym}..."):
-                a = analyze_symbol(sym, interval, 300, td_key)
+                a = analyze_symbol(sym, interval, 400, td_key)
             if a.get("error"):
                 st.error(f"{sym}: {a['error']}")
                 continue
