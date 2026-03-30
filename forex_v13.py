@@ -420,10 +420,10 @@ SYMBOL_CONFIG: Dict[str, Dict] = {
                    sessions=["London","Overlap","Asian"], asset_class="forex",
                    note="Carry trade pair. Strong trends."),
     # ── GOLD ───────────────────────────────────────────────────
-    "XAUUSD": dict(name="Gold",     pip=0.1,    dec=2, atr_sl=1.8, atr_tp1=3.0, atr_tp2=5.5,
-                   grade_aplus=85, grade_a=72, grade_b=58, min_rr=2.0,
+    "XAUUSD": dict(name="Gold",     pip=0.1,    dec=2, atr_sl=1.2, atr_tp1=1.8, atr_tp2=3.0,
+                   grade_aplus=90, grade_a=80, grade_b=65, min_rr=1.3,
                    sessions=["London","Overlap","NewYork"], asset_class="gold",
-                   note="High volatility. Wider RSI zones. Best London/NY overlap."),
+                   note="Scalping mode. Tight SL, fast TP. Best London/NY overlap."),
     # ── CRUDE OIL ──────────────────────────────────────────────
     "XTIUSD": dict(name="WTI Oil",  pip=0.01,   dec=2, atr_sl=2.0, atr_tp1=3.5, atr_tp2=6.0,
                    grade_aplus=88, grade_a=76, grade_b=62, min_rr=2.0,
@@ -966,6 +966,8 @@ def fetch_bars(symbol, interval, bars, td_key):
 # ============================================================
 def add_indicators(df):
     x = df.copy()
+    x["ema9"]   = x["close"].ewm(span=9,   adjust=False).mean()
+    x["ema21"]  = x["close"].ewm(span=21,  adjust=False).mean()
     x["ema20"]  = x["close"].ewm(span=20,  adjust=False).mean()
     x["ema50"]  = x["close"].ewm(span=50,  adjust=False).mean()
     x["ema200"] = x["close"].ewm(span=200, adjust=False).mean()
@@ -1003,20 +1005,44 @@ def _h4_trend(df_h4):
     return "neutral"
 
 def _candle_score(df, direction):
-    """Score candle pattern: 0, 5, or 10."""
+    """Score candle pattern: 0-10. Engulfing, pin bars, momentum candles."""
     if len(df) < 3: return 0
     c = df.iloc[-1]; p = df.iloc[-2]
-    body  = abs(c["close"]-c["open"])
-    range_= c["high"]-c["low"]
+    body  = abs(float(c["close"])-float(c["open"]))
+    range_= float(c["high"])-float(c["low"])
     if range_ == 0: return 0
     body_ratio = body / range_
-    # Engulfing
+    upper_wick = float(c["high"]) - max(float(c["close"]), float(c["open"]))
+    lower_wick = min(float(c["close"]), float(c["open"])) - float(c["low"])
+
     if direction == "Buy":
-        if c["close"] > c["open"] and c["close"] > p["open"] and c["open"] < p["close"]: return 10
-        if c["close"] > c["open"] and body_ratio > 0.6: return 5
+        # Bullish engulfing
+        if float(c["close"]) > float(c["open"]) and float(c["close"]) > float(p["open"]) and float(c["open"]) < float(p["close"]): return 10
+        # Bullish pin bar (hammer): long lower wick, small upper wick
+        if lower_wick > body * 2 and upper_wick < body * 0.5 and body > 0: return 10
+        # Strong bullish candle
+        if float(c["close"]) > float(c["open"]) and body_ratio > 0.65: return 5
+        # Morning star (3-candle reversal)
+        if len(df) >= 4:
+            pp = df.iloc[-3]
+            if float(pp["close"]) < float(pp["open"]) and body_ratio > 0.5 and float(c["close"]) > float(c["open"]):
+                pp_body = abs(float(pp["close"]) - float(pp["open"]))
+                p_body = abs(float(p["close"]) - float(p["open"]))
+                if p_body < pp_body * 0.3: return 8
     else:
-        if c["close"] < c["open"] and c["close"] < p["open"] and c["open"] > p["close"]: return 10
-        if c["close"] < c["open"] and body_ratio > 0.6: return 5
+        # Bearish engulfing
+        if float(c["close"]) < float(c["open"]) and float(c["close"]) < float(p["open"]) and float(c["open"]) > float(p["close"]): return 10
+        # Bearish pin bar (shooting star): long upper wick
+        if upper_wick > body * 2 and lower_wick < body * 0.5 and body > 0: return 10
+        # Strong bearish candle
+        if float(c["close"]) < float(c["open"]) and body_ratio > 0.65: return 5
+        # Evening star
+        if len(df) >= 4:
+            pp = df.iloc[-3]
+            if float(pp["close"]) > float(pp["open"]) and body_ratio > 0.5 and float(c["close"]) < float(c["open"]):
+                pp_body = abs(float(pp["close"]) - float(pp["open"]))
+                p_body = abs(float(p["close"]) - float(p["open"]))
+                if p_body < pp_body * 0.3: return 8
     return 0
 
 def score_signal(df, df_h4, symbol, direction):
@@ -1055,18 +1081,36 @@ def score_signal(df, df_h4, symbol, direction):
         ep = (10 if e20<e50 else 0) + (10 if e50<e200 else 0)
     score += ep; bd["EMA Stack"] = ep
 
-    # 3. Pullback to EMA (15 pts)
+    # 3. Pullback to EMA (15 pts) — improved: check if price is pulling back TO ema, not away
     margin = atr * 0.8
-    if   abs(close-e20) <= margin:           pb = 15
-    elif abs(close-e50) <= margin*1.5:       pb = 8
-    else:                                    pb = 0
+    # Best: close near EMA20 AND coming from the right direction (pullback, not breakdown)
+    near_e20 = abs(close - e20) <= margin
+    near_e50 = abs(close - e50) <= margin * 1.5
+    # Check if previous bar was further from EMA (confirming pullback approach)
+    prev_close = float(prev["close"])
+    approaching_e20 = abs(prev_close - e20) > abs(close - e20)
+    if near_e20 and approaching_e20:     pb = 15  # Perfect pullback to EMA20
+    elif near_e20:                        pb = 10  # Near EMA20 but not clearly pulling back
+    elif near_e50 and abs(prev_close - e50) > abs(close - e50): pb = 8
+    elif near_e50:                        pb = 5
+    else:                                 pb = 0
     score += pb; bd["Pullback"] = pb
 
-    # 4. MACD momentum (15 pts)
+    # 4. MACD momentum (15 pts) — enhanced with cross detection
+    macd_val = float(row.get("macd", 0) or 0)
+    macd_sig = float(row.get("macd_sig", 0) or 0)
+    macd_cross_bull = macd_val > macd_sig and float(prev.get("macd", 0) or 0) <= float(prev.get("macd_sig", 0) or 0)
+    macd_cross_bear = macd_val < macd_sig and float(prev.get("macd", 0) or 0) >= float(prev.get("macd_sig", 0) or 0)
     if direction == "Buy":
-        mp = 15 if (mh > 0 and mh > mh_p) else (8 if mh > mh_p else 0)
+        if macd_cross_bull: mp = 15  # Fresh bullish MACD cross = full points
+        elif mh > 0 and mh > mh_p: mp = 12
+        elif mh > mh_p: mp = 6
+        else: mp = 0
     else:
-        mp = 15 if (mh < 0 and mh < mh_p) else (8 if mh < mh_p else 0)
+        if macd_cross_bear: mp = 15  # Fresh bearish MACD cross
+        elif mh < 0 and mh < mh_p: mp = 12
+        elif mh < mh_p: mp = 6
+        else: mp = 0
     score += mp; bd["MACD"] = mp
 
     # 5. RSI zone (10 pts) — asset-class adjusted
@@ -1101,6 +1145,17 @@ def score_signal(df, df_h4, symbol, direction):
         if not sess_ok_: warns.append(f"⚠ Off-peak session ({sess_name_}) — reduced signal quality")
     score += sp; bd["Session"] = sp
 
+    # 8. Volatility quality check — penalize choppy or chaotic markets
+    if len(df) >= 20:
+        atr_arr = df["atr14"].dropna().tail(20)
+        if len(atr_arr) >= 10:
+            atr_mean = float(atr_arr.mean())
+            atr_std = float(atr_arr.std())
+            # If ATR is very unstable (high std relative to mean), market is chaotic
+            if atr_mean > 0 and atr_std / atr_mean > 0.4:
+                score -= 5
+                warns.append("⚠ Volatile/choppy market — ATR unstable")
+
     score = min(100, max(0, score))
 
     # Grade — symbol-specific thresholds, H4 alignment required for A/A+
@@ -1112,8 +1167,87 @@ def score_signal(df, df_h4, symbol, direction):
 
     return score, bd, grade, warns
 
-def determine_direction(df, df_h4):
-    """Determine trade direction from H4 trend + EMA stack."""
+def _gold_structure_check(df, direction):
+    """
+    Check market structure for gold: Higher-Highs/Higher-Lows for Buy,
+    Lower-Highs/Lower-Lows for Sell. Uses last 30 bars.
+    Returns True if structure supports direction.
+    """
+    if len(df) < 30:
+        return False
+    recent = df.tail(30)
+    # Find swing points (3-bar pivot)
+    highs = []; lows = []
+    for idx in range(2, len(recent)-2):
+        r = recent.iloc[idx]
+        if r["high"] >= recent.iloc[idx-1]["high"] and r["high"] >= recent.iloc[idx-2]["high"] and \
+           r["high"] >= recent.iloc[idx+1]["high"] and r["high"] >= recent.iloc[idx+2]["high"]:
+            highs.append(float(r["high"]))
+        if r["low"] <= recent.iloc[idx-1]["low"] and r["low"] <= recent.iloc[idx-2]["low"] and \
+           r["low"] <= recent.iloc[idx+1]["low"] and r["low"] <= recent.iloc[idx+2]["low"]:
+            lows.append(float(r["low"]))
+    if len(highs) < 2 or len(lows) < 2:
+        return True  # Not enough data, don't filter
+    if direction == "Buy":
+        # Higher highs AND higher lows
+        hh = highs[-1] > highs[-2]
+        hl = lows[-1] > lows[-2]
+        return hh or hl
+    else:
+        # Lower highs AND lower lows
+        lh = highs[-1] < highs[-2]
+        ll = lows[-1] < lows[-2]
+        return lh or ll
+
+def _gold_direction(df, df_h4):
+    """
+    Gold-specific direction using faster EMA9/EMA21 + price structure.
+    More responsive than standard EMA20/50/200 for gold scalping.
+    """
+    if len(df) < 25:
+        return "Wait"
+    row = df.iloc[-1]
+    close = float(row["close"])
+    e9  = float(row.get("ema9",  close))
+    e21 = float(row.get("ema21", close))
+    e50 = float(row.get("ema50", close))
+    rsi = float(row.get("rsi14", 50) or 50)
+    mh  = float(row.get("macd_hist", 0) or 0)
+
+    # H4 trend still matters for gold but with less weight
+    h4t = _h4_trend(df_h4)
+
+    bull = 0; bear = 0
+    # Fast EMA cross (most important for gold scalping)
+    if e9 > e21: bull += 2
+    elif e9 < e21: bear += 2
+    # Price above/below EMA21
+    if close > e21: bull += 1
+    elif close < e21: bear += 1
+    # EMA21 vs EMA50 (medium trend)
+    if e21 > e50: bull += 1
+    elif e21 < e50: bear += 1
+    # MACD histogram direction
+    if mh > 0: bull += 1
+    elif mh < 0: bear += 1
+    # H4 alignment (1 point, not dominant)
+    if h4t in ("bull", "bull_weak"): bull += 1
+    elif h4t in ("bear", "bear_weak"): bear += 1
+    # RSI midline
+    if rsi > 55: bull += 1
+    elif rsi < 45: bear += 1
+
+    # Need strong conviction for gold (5/7 signals)
+    if bull >= 5: return "Buy"
+    if bear >= 5: return "Sell"
+    return "Wait"
+
+def determine_direction(df, df_h4, symbol=""):
+    """Determine trade direction. Gold uses fast EMA system, others use H4+EMA stack."""
+    # Gold-specific direction detection
+    if norm(symbol) == "XAUUSD":
+        return _gold_direction(df, df_h4)
+
     h4t = _h4_trend(df_h4)
     row  = df.iloc[-1]
     e20  = float(row.get("ema20",  row["close"]))
@@ -1443,10 +1577,53 @@ def _gold_momentum_filter(df, direction):
 
     return score
 
+def _gold_candle_quality(df, direction):
+    """
+    Gold-specific candle quality check.
+    Looks for momentum candles, pin bars, and rejection patterns.
+    Returns score 0-10.
+    """
+    if len(df) < 3:
+        return 0
+    c = df.iloc[-1]; p = df.iloc[-2]
+    body = abs(float(c["close"]) - float(c["open"]))
+    rng = float(c["high"]) - float(c["low"])
+    if rng == 0:
+        return 0
+    body_ratio = body / rng
+
+    score = 0
+    if direction == "Buy":
+        # Bullish momentum candle: large body, close near high
+        upper_wick = float(c["high"]) - max(float(c["close"]), float(c["open"]))
+        if float(c["close"]) > float(c["open"]) and body_ratio > 0.6:
+            score += 5
+        # Bullish pin bar: long lower wick, small body at top
+        lower_wick = min(float(c["close"]), float(c["open"])) - float(c["low"])
+        if lower_wick > body * 2 and upper_wick < body:
+            score += 5
+        # Close above previous high
+        if float(c["close"]) > float(p["high"]):
+            score += 3
+    else:
+        # Bearish momentum candle
+        lower_wick = min(float(c["close"]), float(c["open"])) - float(c["low"])
+        if float(c["close"]) < float(c["open"]) and body_ratio > 0.6:
+            score += 5
+        # Bearish pin bar: long upper wick
+        upper_wick = float(c["high"]) - max(float(c["close"]), float(c["open"]))
+        if upper_wick > body * 2 and lower_wick < body:
+            score += 5
+        # Close below previous low
+        if float(c["close"]) < float(p["low"]):
+            score += 3
+
+    return min(10, score)
+
 def gold_engine_score(df, df_h4, direction, base_score, base_grade):
     """
-    Gold-specific scoring overlay. Adds professional gold trading filters
-    on top of the base signal score.
+    Gold-specific scoring overlay V2 — HARD GATE system.
+    Requires minimum gold confirmation to pass. Not just bonus points.
     Returns: (adjusted_score, gold_info_dict, adjusted_grade, extra_warns)
     """
     row   = df.iloc[-1]
@@ -1456,6 +1633,7 @@ def gold_engine_score(df, df_h4, direction, base_score, base_grade):
     extra_warns = []
     gold_info = {}
     bonus = 0
+    confirmations = 0  # Track number of gold-specific confirmations
 
     # 1. Asian Range Breakout
     asian = _gold_asian_range(df)
@@ -1464,16 +1642,17 @@ def gold_engine_score(df, df_h4, direction, base_score, base_grade):
         breakout = _gold_breakout_signal(df, asian, atr)
         gold_info["breakout"] = breakout
         if breakout == "bear_breakout" and direction == "Sell":
-            bonus += 10
+            bonus += 10; confirmations += 1
             gold_info["breakout_aligned"] = True
         elif breakout == "bull_breakout" and direction == "Buy":
-            bonus += 10
+            bonus += 10; confirmations += 1
             gold_info["breakout_aligned"] = True
         elif breakout == "inside":
-            bonus -= 5
-            extra_warns.append("⚠ Gold inside Asian range — wait for breakout")
+            bonus -= 8
+            extra_warns.append("⚠ Gold inside Asian range — NO TRADE")
             gold_info["breakout_aligned"] = False
         else:
+            bonus -= 5  # Breakout opposes direction
             gold_info["breakout_aligned"] = False
     else:
         gold_info["breakout"] = "no_data"
@@ -1484,21 +1663,42 @@ def gold_engine_score(df, df_h4, direction, base_score, base_grade):
     gold_info["sweep"] = sweep
     if sweep["detected"]:
         if sweep["direction"] == "bear" and direction == "Sell":
-            bonus += 10
-            extra_warns.append(f"🏦 Liquidity sweep detected above {sweep['sweep_level']:.2f} — institutional sell signal")
+            bonus += 12; confirmations += 1
+            sweep_lvl = sweep['sweep_level']
+            extra_warns.append(f"🏦 Liquidity sweep above {sweep_lvl:.2f} — institutional sell")
         elif sweep["direction"] == "bull" and direction == "Buy":
-            bonus += 10
-            extra_warns.append(f"🏦 Liquidity sweep detected below {sweep['sweep_level']:.2f} — institutional buy signal")
+            bonus += 12; confirmations += 1
+            sweep_lvl = sweep['sweep_level']
+            extra_warns.append(f"🏦 Liquidity sweep below {sweep_lvl:.2f} — institutional buy")
         elif sweep["direction"] != direction.lower()[:4]:
-            bonus -= 10
-            extra_warns.append(f"⚠ Liquidity sweep opposes your direction — caution")
+            bonus -= 15
+            extra_warns.append("🚫 Liquidity sweep OPPOSES direction — avoid trade")
 
-    # 3. Gold Momentum Filter
+    # 3. Gold Momentum Filter (stricter)
     mom_bonus = _gold_momentum_filter(df, direction)
     gold_info["momentum_bonus"] = mom_bonus
+    if mom_bonus >= 10:
+        confirmations += 1
     bonus += mom_bonus
 
-    # 4. Session Filter — Gold performs best at London/NY overlap
+    # 4. Market Structure Check
+    structure_ok = _gold_structure_check(df, direction)
+    gold_info["structure_ok"] = structure_ok
+    if structure_ok:
+        bonus += 5; confirmations += 1
+    else:
+        bonus -= 10
+        extra_warns.append("⚠ Market structure opposes direction")
+
+    # 5. Candle Quality
+    candle_q = _gold_candle_quality(df, direction)
+    gold_info["candle_quality"] = candle_q
+    if candle_q >= 5:
+        bonus += 5; confirmations += 1
+    elif candle_q == 0:
+        bonus -= 5
+
+    # 6. Session Filter — Gold performs best at London/NY overlap
     sess_name = get_session_now()
     if "Overlap" in sess_name:
         bonus += 5
@@ -1507,26 +1707,33 @@ def gold_engine_score(df, df_h4, direction, base_score, base_grade):
         bonus += 2
         gold_info["session_quality"] = "good"
     elif "Asian" in sess_name:
-        bonus -= 5
+        bonus -= 8
         gold_info["session_quality"] = "range"
-        extra_warns.append("⚠ Gold Asian session — range-bound, avoid breakout trades")
+        extra_warns.append("⚠ Gold Asian session — avoid trading")
     else:
+        bonus -= 3
         gold_info["session_quality"] = "off"
 
-    # 5. Overextension check for gold
+    # 7. Overextension check (stricter for gold: 2.5× ATR)
     if len(df) >= 20:
         c20 = float(df.iloc[-20]["close"])
         move_20 = abs(close - c20)
-        if move_20 > atr * 4:
-            bonus -= 10
-            extra_warns.append(f"⚠ Gold overextended: moved {move_20:.2f} in 20 bars ({move_20/atr:.1f}× ATR)")
+        if move_20 > atr * 2.5:
+            bonus -= 15
+            extra_warns.append(f"⚠ Gold overextended: {move_20:.2f} in 20 bars ({move_20/atr:.1f}× ATR)")
+
+    # ══ HARD GATE: Require minimum 2 gold confirmations ══
+    gold_info["confirmations"] = confirmations
+    if confirmations < 2:
+        bonus -= 20  # Heavy penalty — will push below A grade threshold
+        extra_warns.append(f"🚫 Gold gate: only {confirmations}/2 confirmations — signal weak")
 
     # Calculate adjusted score
     adjusted_score = min(100, max(0, base_score + bonus))
     gold_info["bonus"] = bonus
     gold_info["adjusted_score"] = adjusted_score
 
-    # Re-grade with adjusted score
+    # Re-grade with adjusted score (stricter thresholds)
     if   adjusted_score >= c["grade_aplus"]: adjusted_grade = "A+"
     elif adjusted_score >= c["grade_a"]:    adjusted_grade = "A"
     elif adjusted_score >= c["grade_b"]:    adjusted_grade = "B"
@@ -1560,7 +1767,7 @@ def analyze_symbol(symbol, interval, bars, td_key):
     row      = df.iloc[-1]
     close    = float(row["close"])
     atr      = float(row.get("atr14", 0.001) or 0.001)
-    direction= determine_direction(df, df_h4)
+    direction= determine_direction(df, df_h4, symbol)
 
     score, bd, grade, warns = score_signal(df, df_h4, symbol, direction)
 
@@ -2632,7 +2839,9 @@ def page_backtest():
     spike_trades = 0
     consecutive_losses = 0
     last_trade_bar = 0
-    COOLDOWN_BARS = 8
+    is_gold = norm(bt_sym) == "XAUUSD"
+    COOLDOWN_BARS = 15 if is_gold else 8  # Gold needs more cooldown
+    OVEREXT_THRESH = 2.0 if is_gold else 3.0  # Stricter for gold
     i = 200
 
     while i < len(df_raw)-1:
@@ -2648,14 +2857,14 @@ def page_backtest():
         # ── Loss streak protection: pause after 3 consecutive losses ──
         if consecutive_losses >= 3:
             consecutive_losses = 0
-            i += 3; continue
+            i += COOLDOWN_BARS; continue  # Skip more bars after loss streak
 
-        direction = determine_direction(df_sl, df_h4)
+        direction = determine_direction(df_sl, df_h4, bt_sym)
         if direction == "Wait":
             i += 1; continue
 
         # ── Overextended filter ───────────────────────────────
-        if _is_overextended(df_sl, direction, atr, threshold=3.0):
+        if _is_overextended(df_sl, direction, atr, threshold=OVEREXT_THRESH):
             i += 1; continue
 
         score, bd, grade, warns = score_signal(df_sl, df_h4, bt_sym, direction)
@@ -2701,19 +2910,51 @@ def page_backtest():
         else:
             lot = 1.0
 
-        # Simulate forward (up to 150 bars, trailing stop to breakeven)
+        # Simulate forward (smarter trailing stop system)
+        max_bars_forward = 80 if is_gold else 150  # Gold: faster timeout
         result = "timeout"; exit_price = close; exit_i = i
         trailing_sl = sl
-        be_trigger_pct = 0.6
-        be_level = close + (tp1 - close) * be_trigger_pct if direction == "Buy" else close - (close - tp1) * be_trigger_pct
+        be_trigger_pct = 0.5  # Move to BE at 50% of TP1 (was 60%)
+        trail_trigger_pct = 0.75  # Start trailing at 75% of TP1
+        risk_dist = abs(close - sl)
+        tp1_dist = abs(tp1 - close)
+
+        be_level = close + tp1_dist * be_trigger_pct if direction == "Buy" else close - tp1_dist * be_trigger_pct
+        trail_level = close + tp1_dist * trail_trigger_pct if direction == "Buy" else close - tp1_dist * trail_trigger_pct
         moved_to_be = False
-        for j in range(i+1, min(i+150, len(df_raw))):
+        trailing_active = False
+        best_price = close  # Track best price for trailing
+
+        for j in range(i+1, min(i+max_bars_forward, len(df_raw))):
             future = df_raw.iloc[j]
             fh = float(future["high"]); fl = float(future["low"])
+
+            # Track best price reached
+            if direction == "Buy":
+                best_price = max(best_price, fh)
+            else:
+                best_price = min(best_price, fl)
+
+            # Stage 1: Move to breakeven at 50% of TP1
             if not moved_to_be:
                 if (direction == "Buy" and fh >= be_level) or (direction == "Sell" and fl <= be_level):
                     trailing_sl = close + (atr * 0.1 if direction == "Buy" else -atr * 0.1)
                     moved_to_be = True
+
+            # Stage 2: Active trailing at 75% of TP1 — trail by 0.5× ATR
+            if not trailing_active and moved_to_be:
+                if (direction == "Buy" and fh >= trail_level) or (direction == "Sell" and fl <= trail_level):
+                    trailing_active = True
+
+            if trailing_active:
+                if direction == "Buy":
+                    new_trail = best_price - atr * 0.5
+                    trailing_sl = max(trailing_sl, new_trail)
+                else:
+                    new_trail = best_price + atr * 0.5
+                    trailing_sl = min(trailing_sl, new_trail)
+
+            # Check SL hit
             if direction == "Buy":
                 if fl <= trailing_sl:
                     result = "Loss" if not moved_to_be else "BE"
@@ -2726,9 +2967,10 @@ def page_backtest():
                     exit_price = trailing_sl; exit_i = j; break
                 if fl <= tp1:
                     result = "Win"; exit_price = tp1; exit_i = j; break
+
         if result == "timeout":
-            exit_price = float(df_raw.iloc[min(i+149, len(df_raw)-1)]["close"])
-            exit_i = min(i+149, len(df_raw)-1)
+            exit_price = float(df_raw.iloc[min(i+max_bars_forward-1, len(df_raw)-1)]["close"])
+            exit_i = min(i+max_bars_forward-1, len(df_raw)-1)
 
         risk = abs(close-sl)
         move = (exit_price-close) if direction=="Buy" else (close-exit_price)
