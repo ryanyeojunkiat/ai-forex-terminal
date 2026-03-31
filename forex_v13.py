@@ -842,7 +842,8 @@ def grok_primary_analysis(symbol, close, atr, rsi, macd_val, macd_hist,
                           ema20, ema50, ema200, h4_trend, session_name,
                           calc_direction, calc_score, calc_grade,
                           sl_calc, tp1_calc, tp2_calc,
-                          last_10_bars_str, xai_key, bb_upper=0, bb_lower=0):
+                          last_10_bars_str, xai_key, bb_upper=0, bb_lower=0,
+                          smart_entry=None):
     """
     GROK-PRIMARY: Grok receives ALL technical data + calculator score,
     then makes the FINAL trading decision with its own AI Rating.
@@ -889,6 +890,13 @@ CALCULATOR BACKUP (rule-based):
 Direction: {calc_direction} | Score: {calc_score}/100 | Grade: {calc_grade}
 SL: {sl_calc:.{dec}f} | TP1: {tp1_calc:.{dec}f} | TP2: {tp2_calc:.{dec}f}
 
+SMART ENTRY ENGINE:
+{f"Suggested Entry: {smart_entry['entry_price']:.{dec}f} ({smart_entry['entry_type']})" if smart_entry else "N/A"}
+{f"Entry Quality: {smart_entry['entry_stars']} ({smart_entry['entry_quality']}/5)" if smart_entry else ""}
+{f"Reason: {smart_entry['entry_reason']}" if smart_entry else ""}
+{f"Key Level: {smart_entry['key_level']:.{dec}f}" if smart_entry else ""}
+{f"Nearest Support: {smart_entry['nearest_support']:.{dec}f} | Resistance: {smart_entry['nearest_resistance']:.{dec}f}" if smart_entry else ""}
+
 LAST 10 CANDLES:
 {last_10_bars_str}
 
@@ -898,7 +906,8 @@ Analyze ALL the above + your macro/news knowledge. Return ONLY valid JSON:
   "ai_rating": <1-10 scale: 1=terrible, 5=neutral, 8=strong, 10=perfect setup>,
   "direction": "BUY" or "SELL" or "WAIT",
   "action": "STRONG BUY" or "BUY" or "WAIT" or "SELL" or "STRONG SELL",
-  "entry": <optimal entry price>,
+  "entry": <optimal entry price based on SMART ENTRY ENGINE levels>,
+  "entry_type": "MARKET" or "LIMIT" or "WAIT",
   "sl": <stop loss price>,
   "tp1": <take profit 1>,
   "tp2": <take profit 2>,
@@ -915,7 +924,10 @@ RULES:
 - If session is off-peak, reduce rating by 1-2 points
 - If major news event within 2h, add risk_warning
 - Be HONEST — if no clear setup, say WAIT. Don't force trades.
-- Entry/SL/TP must be realistic based on ATR and current price
+- ENTRY MUST be at a technical level (EMA20, support/resistance, BB band), NOT just current price ± small offset
+- entry_type: MARKET = enter now (price at ideal level), LIMIT = set pending order at key level, WAIT = no good entry yet
+- If price is far from any key level, set entry_type to WAIT or LIMIT at the nearest key level
+- SL/TP must be realistic based on ATR. SL behind the key level, TP at next key level
 """
 
     raw = _grok([
@@ -944,8 +956,22 @@ RULES:
             if k in result:
                 result[k] = float(result[k])
             else:
-                # Fallback to calculator values
-                result[k] = {"entry": close, "sl": sl_calc, "tp1": tp1_calc, "tp2": tp2_calc}[k]
+                # Fallback: use smart entry if available, otherwise calculator
+                if k == "entry" and smart_entry:
+                    result[k] = smart_entry["entry_price"]
+                else:
+                    result[k] = {"entry": close, "sl": sl_calc, "tp1": tp1_calc, "tp2": tp2_calc}[k]
+        # entry_type from Grok or smart entry fallback
+        if "entry_type" not in result or result.get("entry_type") not in ("MARKET","LIMIT","WAIT"):
+            result["entry_type"] = smart_entry["entry_type"] if smart_entry else "MARKET"
+        # Attach smart entry metadata
+        if smart_entry:
+            result["entry_quality"] = smart_entry["entry_quality"]
+            result["entry_stars"] = smart_entry["entry_stars"]
+            result["entry_reason"] = smart_entry["entry_reason"]
+            result["key_level"] = smart_entry["key_level"]
+            result["nearest_support"] = smart_entry["nearest_support"]
+            result["nearest_resistance"] = smart_entry["nearest_resistance"]
         result["error"] = False
         # Add calculator comparison
         result["calc_score"] = calc_score
@@ -1575,6 +1601,221 @@ def compute_levels(entry, direction, atr, symbol, df=None):
     rr = tp1_d / sl_d if sl_d > 0 else 0
     return {"sl":sl,"tp1":tp1,"tp2":tp2,"sl_d":sl_d,"tp1_d":tp1_d,"rr":rr}
 
+
+# ═══════════════════════════════════════════════════════════════
+# SMART ENTRY ENGINE — calculates optimal entry based on technicals
+# ═══════════════════════════════════════════════════════════════
+def calculate_smart_entry(df, direction, close, atr, ema20, ema50, ema200,
+                          bb_upper, bb_lower, rsi, symbol):
+    """
+    Calculate smart entry price based on technical levels.
+    Returns dict with:
+      entry_price, entry_type (MARKET/LIMIT/WAIT),
+      entry_quality (1-5 stars), entry_reason, key_level
+    """
+    c = cfg(symbol)
+    dec = c.get("dec", 5)
+    margin_tight = atr * 0.5   # tight zone = within 0.5 ATR
+    margin_med   = atr * 1.0   # medium zone
+    margin_wide  = atr * 1.5   # wide zone
+
+    # ── Find key technical levels ───────────────────────────────
+    swing_highs, swing_lows = _find_swings(df)
+    # Nearest support (below price) & resistance (above price)
+    supports = sorted([l for l in swing_lows if l < close], reverse=True)
+    resistances = sorted([r for r in swing_highs if r > close])
+    nearest_support = supports[0] if supports else close - atr * 1.5
+    nearest_resistance = resistances[0] if resistances else close + atr * 1.5
+
+    # Bollinger mid
+    bb_mid = (bb_upper + bb_lower) / 2 if bb_upper > 0 and bb_lower > 0 else close
+
+    # ── Determine best entry by direction ───────────────────────
+    quality = 1
+    entry_price = close
+    entry_type = "MARKET"
+    entry_reason = "Current price"
+    key_level = close
+
+    if direction == "Buy":
+        # Priority 1: Price already at EMA20 + near support = PERFECT (5 stars)
+        near_ema20 = abs(close - ema20) <= margin_tight
+        near_support = abs(close - nearest_support) <= margin_tight
+        approaching_bb_lower = abs(close - bb_lower) <= margin_med
+
+        if near_ema20 and near_support:
+            quality = 5
+            entry_price = close
+            entry_type = "MARKET"
+            entry_reason = f"Price at EMA20 ({ema20:.{dec}f}) + Support ({nearest_support:.{dec}f}) confluence"
+            key_level = ema20
+
+        elif near_ema20:
+            quality = 4
+            entry_price = close
+            entry_type = "MARKET"
+            entry_reason = f"Price at EMA20 pullback zone ({ema20:.{dec}f})"
+            key_level = ema20
+
+        elif approaching_bb_lower and close < bb_mid:
+            quality = 4
+            entry_price = close
+            entry_type = "MARKET"
+            entry_reason = f"Price near Bollinger Lower ({bb_lower:.{dec}f})"
+            key_level = bb_lower
+
+        elif near_support:
+            quality = 3
+            entry_price = close
+            entry_type = "MARKET"
+            entry_reason = f"Price at support level ({nearest_support:.{dec}f})"
+            key_level = nearest_support
+
+        elif close > ema20 and abs(close - ema20) <= margin_wide:
+            # Price above EMA20 but not too far - can still limit order at EMA20
+            quality = 3
+            entry_price = round(ema20 + atr * 0.1, c.get("dec", 5))
+            entry_type = "LIMIT"
+            entry_reason = f"Limit order at EMA20 pullback ({ema20:.{dec}f})"
+            key_level = ema20
+
+        elif close > ema20 and abs(close - ema20) > margin_wide:
+            # Price far above EMA20 — check EMA50 or wait
+            if abs(close - ema50) <= margin_med:
+                quality = 2
+                entry_price = close
+                entry_type = "MARKET"
+                entry_reason = f"Price near EMA50 ({ema50:.{dec}f}) — not ideal"
+                key_level = ema50
+            elif close > ema20 + atr * 2:
+                quality = 1
+                entry_price = round(ema20 + atr * 0.15, c.get("dec", 5))
+                entry_type = "WAIT"
+                entry_reason = f"Price overextended — wait for pullback to EMA20 ({ema20:.{dec}f})"
+                key_level = ema20
+            else:
+                quality = 2
+                entry_price = round(ema20 + atr * 0.1, c.get("dec", 5))
+                entry_type = "LIMIT"
+                entry_reason = f"Set limit at EMA20 ({ema20:.{dec}f})"
+                key_level = ema20
+
+        else:
+            # Below EMA20 but not at support
+            if close < ema50 and abs(close - ema50) <= margin_tight:
+                quality = 2
+                entry_price = close
+                entry_type = "MARKET"
+                entry_reason = f"Price at EMA50 ({ema50:.{dec}f}) — deeper pullback"
+                key_level = ema50
+            else:
+                quality = 2
+                entry_price = round(nearest_support + atr * 0.1, c.get("dec", 5))
+                entry_type = "LIMIT"
+                entry_reason = f"Limit at support ({nearest_support:.{dec}f})"
+                key_level = nearest_support
+
+    else:  # SELL
+        near_ema20 = abs(close - ema20) <= margin_tight
+        near_resistance = abs(close - nearest_resistance) <= margin_tight
+        approaching_bb_upper = abs(close - bb_upper) <= margin_med
+
+        if near_ema20 and near_resistance:
+            quality = 5
+            entry_price = close
+            entry_type = "MARKET"
+            entry_reason = f"Price at EMA20 ({ema20:.{dec}f}) + Resistance ({nearest_resistance:.{dec}f}) confluence"
+            key_level = ema20
+
+        elif near_ema20:
+            quality = 4
+            entry_price = close
+            entry_type = "MARKET"
+            entry_reason = f"Price at EMA20 pullback zone ({ema20:.{dec}f})"
+            key_level = ema20
+
+        elif approaching_bb_upper and close > bb_mid:
+            quality = 4
+            entry_price = close
+            entry_type = "MARKET"
+            entry_reason = f"Price near Bollinger Upper ({bb_upper:.{dec}f})"
+            key_level = bb_upper
+
+        elif near_resistance:
+            quality = 3
+            entry_price = close
+            entry_type = "MARKET"
+            entry_reason = f"Price at resistance level ({nearest_resistance:.{dec}f})"
+            key_level = nearest_resistance
+
+        elif close < ema20 and abs(close - ema20) <= margin_wide:
+            quality = 3
+            entry_price = round(ema20 - atr * 0.1, c.get("dec", 5))
+            entry_type = "LIMIT"
+            entry_reason = f"Limit order at EMA20 pullback ({ema20:.{dec}f})"
+            key_level = ema20
+
+        elif close < ema20 and abs(close - ema20) > margin_wide:
+            if abs(close - ema50) <= margin_med:
+                quality = 2
+                entry_price = close
+                entry_type = "MARKET"
+                entry_reason = f"Price near EMA50 ({ema50:.{dec}f}) — not ideal"
+                key_level = ema50
+            elif close < ema20 - atr * 2:
+                quality = 1
+                entry_price = round(ema20 - atr * 0.15, c.get("dec", 5))
+                entry_type = "WAIT"
+                entry_reason = f"Price overextended — wait for pullback to EMA20 ({ema20:.{dec}f})"
+                key_level = ema20
+            else:
+                quality = 2
+                entry_price = round(ema20 - atr * 0.1, c.get("dec", 5))
+                entry_type = "LIMIT"
+                entry_reason = f"Set limit at EMA20 ({ema20:.{dec}f})"
+                key_level = ema20
+
+        else:
+            if close > ema50 and abs(close - ema50) <= margin_tight:
+                quality = 2
+                entry_price = close
+                entry_type = "MARKET"
+                entry_reason = f"Price at EMA50 ({ema50:.{dec}f}) — deeper pullback"
+                key_level = ema50
+            else:
+                quality = 2
+                entry_price = round(nearest_resistance - atr * 0.1, c.get("dec", 5))
+                entry_type = "LIMIT"
+                entry_reason = f"Limit at resistance ({nearest_resistance:.{dec}f})"
+                key_level = nearest_resistance
+
+    # ── RSI adjustment ──────────────────────────────────────────
+    if direction == "Buy" and rsi > 70:
+        quality = max(1, quality - 1)
+        if entry_type == "MARKET":
+            entry_type = "WAIT"
+        entry_reason += " | RSI overbought — risky BUY"
+    elif direction == "Sell" and rsi < 30:
+        quality = max(1, quality - 1)
+        if entry_type == "MARKET":
+            entry_type = "WAIT"
+        entry_reason += " | RSI oversold — risky SELL"
+
+    # ── Stars display ───────────────────────────────────────────
+    stars = "★" * quality + "☆" * (5 - quality)
+
+    return {
+        "entry_price": round(entry_price, c.get("dec", 5)),
+        "entry_type": entry_type,        # MARKET / LIMIT / WAIT
+        "entry_quality": quality,         # 1-5
+        "entry_stars": stars,             # ★★★★☆
+        "entry_reason": entry_reason,
+        "key_level": round(key_level, c.get("dec", 5)),
+        "nearest_support": round(nearest_support, c.get("dec", 5)),
+        "nearest_resistance": round(nearest_resistance, c.get("dec", 5)),
+    }
+
+
 def _is_overextended(df, direction, atr, threshold=3.0):
     """Check if price has moved too far too fast (overextended)."""
     if len(df) < 20:
@@ -2024,8 +2265,15 @@ def analyze_symbol(symbol, interval, bars, td_key):
     bb_upper = float(row.get("bb_upper",0) or 0)
     bb_lower = float(row.get("bb_lower",0) or 0)
 
+    # ── SMART ENTRY ENGINE ─────────────────────────────────────
+    smart_entry = calculate_smart_entry(
+        df=df, direction=direction, close=close, atr=atr,
+        ema20=ema20_val, ema50=ema50_val, ema200=ema200_val,
+        bb_upper=bb_upper, bb_lower=bb_lower, rsi=rsi_val, symbol=symbol
+    )
+
     # ── GROK PRIMARY ANALYSIS ─────────────────────────────────
-    # Feed ALL technical data to Grok, get AI-driven trading decision
+    # Feed ALL technical data + smart entry to Grok, get AI-driven trading decision
     grok_result = None
     xai_key = get_xai_key()
     if xai_key:
@@ -2040,6 +2288,7 @@ def analyze_symbol(symbol, interval, bars, td_key):
                 sl_calc=levels["sl"], tp1_calc=levels["tp1"], tp2_calc=levels["tp2"],
                 last_10_bars_str=last_10, xai_key=xai_key,
                 bb_upper=bb_upper, bb_lower=bb_lower,
+                smart_entry=smart_entry,
             )
         except Exception:
             grok_result = None
@@ -2059,7 +2308,8 @@ def analyze_symbol(symbol, interval, bars, td_key):
         "h4_trend": _h4_trend(df_h4),
         "spike": spike_info,
         "gold": gold_info,
-        "grok": grok_result,  # NEW: Grok-primary AI analysis
+        "grok": grok_result,  # Grok-primary AI analysis
+        "smart_entry": smart_entry,  # Smart Entry Engine data
         "error": None,
     }
 
@@ -2571,6 +2821,8 @@ def page_overview():
                     f"padding:3px 8px;font-size:10px;color:{sp_col};font-family:Space Mono,monospace;"
                     f"margin-top:4px;'>{sp_info['message']}</div>")
 
+            # ── SMART ENTRY data ──────────────────────────────────
+            se = a.get("smart_entry", {})
             # ── GROK PRIMARY display ──────────────────────────────
             grok = a.get("grok")
             if grok and not grok.get("error"):
@@ -2642,6 +2894,12 @@ def page_overview():
                 f"<span style='color:#8b9ab0;'>H4: <span style='color:#e8edf2;'>{a['h4_trend']}</span></span>"
                 f"<span style='color:#8b9ab0;'>RSI: <span style='color:#e8edf2;'>{fmt_num(a['rsi'],1)}</span></span>"
                 f"<span style='color:{sess_col};'>{a['session']}</span></div>"
+                # Smart Entry row
+                f"<div style='display:flex;gap:8px;font-size:11px;margin-top:4px;align-items:center;'>"
+                f"<span style='color:{'#10b981' if se.get('entry_type')=='MARKET' else ('#f59e0b' if se.get('entry_type')=='LIMIT' else '#ef4444')};font-weight:700;font-family:Space Mono,monospace;'>"
+                f"{'🟢' if se.get('entry_type')=='MARKET' else ('🟡' if se.get('entry_type')=='LIMIT' else '🔴')} {se.get('entry_type','MARKET')}</span>"
+                f"<span style='color:#00d4aa;font-weight:700;font-family:Space Mono,monospace;'>{fmt_price(se.get('entry_price', price),sym)}</span>"
+                f"<span style='color:#f59e0b;font-size:10px;'>{se.get('entry_stars','★☆☆☆☆')}</span></div>"
                 # Levels row
                 f"<div style='display:flex;gap:12px;font-size:11px;margin-top:4px;'>"
                 f"<span class='muted'>SL <b style='color:#ef4444;'>{fmt_price(a['sl'],sym)}</b></span>"
@@ -2851,14 +3109,38 @@ def page_symbol(symbol):
         f"{kpi('ATR', fmt_num(a['atr'],cfg_['dec']), '#8b9ab0')}"
         f"{kpi('SESSION', a['session'][:10], sess_col)}"
         f"</div>", unsafe_allow_html=True)
-    # Row 2: trade levels
+    # ── Smart Entry data for detail page ────────────────────────
+    _se = a.get("smart_entry", {})
+    _se_price = _se.get("entry_price", price)
+    _se_type = _se.get("entry_type", "MARKET")
+    _se_stars = _se.get("entry_stars", "★☆☆☆☆")
+    _se_reason = _se.get("entry_reason", "")
+    _se_quality = _se.get("entry_quality", 1)
+    _se_type_col = "#10b981" if _se_type == "MARKET" else ("#f59e0b" if _se_type == "LIMIT" else "#ef4444")
+    _se_type_icon = "🟢" if _se_type == "MARKET" else ("🟡" if _se_type == "LIMIT" else "🔴")
+
+    # Row 2: Smart Entry + trade levels
     st.markdown(
-        f"<div style='display:flex;gap:6px;margin:0 0 10px;'>"
-        f"{kpi('ENTRY', fmt_price(price,symbol), '#00d4aa')}"
+        f"<div style='display:flex;gap:6px;margin:0 0 4px;'>"
+        f"{kpi(f'{_se_type_icon} ENTRY ({_se_type})', fmt_price(_se_price,symbol), _se_type_col)}"
         f"{kpi('SL', fmt_price(a['sl'],symbol), '#ef4444')}"
         f"{kpi('TP1', fmt_price(a['tp1'],symbol), '#10b981')}"
         f"{kpi('TP2', fmt_price(a['tp2'],symbol), '#84cc16')}"
         f"{kpi('R:R', fmt_num(a['rr'],1)+':1', '#a78bfa')}"
+        f"</div>", unsafe_allow_html=True)
+
+    # Entry Quality bar + reason
+    _eq_bar_col = "#10b981" if _se_quality >= 4 else ("#f59e0b" if _se_quality >= 3 else "#ef4444")
+    _eq_pct = _se_quality * 20
+    st.markdown(
+        f"<div style='background:#0d1117;border:1px solid rgba(255,255,255,0.08);border-radius:8px;"
+        f"padding:8px 12px;margin:0 0 8px;'>"
+        f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;'>"
+        f"<span style='font-size:10px;color:#8b9ab0;font-family:Space Mono,monospace;letter-spacing:.05em;'>ENTRY QUALITY</span>"
+        f"<span style='font-size:12px;color:{_eq_bar_col};font-weight:700;'>{_se_stars}</span></div>"
+        f"<div style='background:rgba(255,255,255,0.06);border-radius:4px;height:6px;margin-bottom:6px;'>"
+        f"<div style='background:{_eq_bar_col};width:{_eq_pct}%;height:100%;border-radius:4px;'></div></div>"
+        f"<div style='font-size:10px;color:#8b9ab0;font-family:Space Mono,monospace;'>{_se_reason}</div>"
         f"</div>", unsafe_allow_html=True)
 
     # Row 3: Risk/Reward in actual currency
