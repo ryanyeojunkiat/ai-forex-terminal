@@ -524,10 +524,10 @@ SYMBOL_CONFIG: Dict[str, Dict] = {
                    sessions=["London","Overlap","Asian"], asset_class="forex",
                    note="Carry trade pair. Strong trends."),
     # ── GOLD ───────────────────────────────────────────────────
-    "XAUUSD": dict(name="Gold",     pip=0.1,    dec=2, atr_sl=2.5, atr_tp1=4.0, atr_tp2=7.0,
-                   grade_aplus=92, grade_a=82, grade_b=68, min_rr=2.5,
-                   sessions=["London","Overlap"],
-                   note="High volatility. Only trade London/NY overlap."),
+    "XAUUSD": dict(name="Gold",     pip=0.1,    dec=2, atr_sl=2.0, atr_tp1=3.0, atr_tp2=5.5,
+                   grade_aplus=88, grade_a=76, grade_b=62, min_rr=1.5,
+                   sessions=["London","Overlap","NewYork"], asset_class="gold",
+                   note="Multi-TF Smart Money hybrid. Best London/NY Killzones."),
     # ── CRUDE OIL ──────────────────────────────────────────────
     "XTIUSD": dict(name="WTI Oil",  pip=0.01,   dec=2, atr_sl=2.0, atr_tp1=3.5, atr_tp2=6.0,
                    grade_aplus=88, grade_a=76, grade_b=62, min_rr=2.0,
@@ -1746,6 +1746,159 @@ def _gold_liquidity_sweep(df, atr, lookback=30):
 
     return {"detected": False, "direction": None, "sweep_level": 0}
 
+def _gold_supply_demand_zones(df, lookback=80):
+    """
+    Identify Supply & Demand zones based on strong impulse moves.
+    Supply zone = origin of strong bearish move. Demand zone = origin of strong bullish move.
+    """
+    zones = {"supply": [], "demand": []}
+    if len(df) < lookback:
+        return zones
+    data = df.tail(lookback)
+    atr = float(data.iloc[-1].get("atr14", 1.0) or 1.0)
+    threshold = atr * 1.5
+    for i in range(1, len(data) - 1):
+        curr = data.iloc[i]
+        body = abs(float(curr["close"]) - float(curr["open"]))
+        if body > threshold:
+            if float(curr["close"]) < float(curr["open"]):
+                zones["supply"].append({
+                    "high": float(curr["high"]),
+                    "low": float(curr["open"]),
+                    "strength": body / atr
+                })
+            else:
+                zones["demand"].append({
+                    "high": float(curr["open"]),
+                    "low": float(curr["low"]),
+                    "strength": body / atr
+                })
+    zones["supply"] = sorted(zones["supply"], key=lambda z: z["strength"], reverse=True)[:3]
+    zones["demand"] = sorted(zones["demand"], key=lambda z: z["strength"], reverse=True)[:3]
+    return zones
+
+def _gold_price_in_zone(close, zones, atr):
+    """Check if price is in any supply or demand zone."""
+    margin = atr * 0.3
+    for z in zones.get("supply", []):
+        if z["low"] - margin <= close <= z["high"] + margin:
+            return "supply"
+    for z in zones.get("demand", []):
+        if z["low"] - margin <= close <= z["high"] + margin:
+            return "demand"
+    return None
+
+def _gold_fvg_detection(df, direction, lookback=50):
+    """
+    Detect Fair Value Gap (FVG) — imbalance between 3 consecutive candles.
+    Bullish FVG: candle3.low > candle1.high (gap up). Bearish FVG: candle3.high < candle1.low.
+    """
+    if len(df) < lookback:
+        return {"detected": False, "type": None, "level": 0}
+    data = df.tail(lookback)
+    fvgs = []
+    for i in range(2, len(data)):
+        c1 = data.iloc[i-2]
+        c3 = data.iloc[i]
+        gap_bull = float(c3["low"]) - float(c1["high"])
+        gap_bear = float(c1["low"]) - float(c3["high"])
+        if gap_bull > 0:
+            fvgs.append({"type": "bullish", "top": float(c3["low"]), "bottom": float(c1["high"]), "size": gap_bull})
+        elif gap_bear > 0:
+            fvgs.append({"type": "bearish", "top": float(c1["low"]), "bottom": float(c3["high"]), "size": gap_bear})
+    if not fvgs:
+        return {"detected": False, "type": None, "level": 0}
+    close = float(data.iloc[-1]["close"])
+    atr = float(data.iloc[-1].get("atr14", 1.0) or 1.0)
+    for fvg in reversed(fvgs):
+        if fvg["type"] == "bullish" and direction == "Buy":
+            if fvg["bottom"] - atr <= close <= fvg["top"] + atr:
+                return {"detected": True, "type": "bullish_fvg", "level": fvg["bottom"]}
+        elif fvg["type"] == "bearish" and direction == "Sell":
+            if fvg["bottom"] - atr <= close <= fvg["top"] + atr:
+                return {"detected": True, "type": "bearish_fvg", "level": fvg["top"]}
+    return {"detected": False, "type": None, "level": 0}
+
+def _gold_choch_detection(df, lookback=40):
+    """
+    Change of Character (CHoCH) — detect when market structure shifts.
+    Bullish CHoCH: price breaks above recent swing high after making lower lows.
+    Bearish CHoCH: price breaks below recent swing low after making higher highs.
+    """
+    if len(df) < lookback:
+        return {"detected": False, "direction": None}
+    data = df.tail(lookback)
+    swing_highs = []
+    swing_lows = []
+    for i in range(2, len(data) - 2):
+        r = data.iloc[i]
+        if float(r["high"]) >= max(float(data.iloc[i-1]["high"]), float(data.iloc[i-2]["high"]),
+                                    float(data.iloc[i+1]["high"]), float(data.iloc[i+2]["high"])):
+            swing_highs.append(float(r["high"]))
+        if float(r["low"]) <= min(float(data.iloc[i-1]["low"]), float(data.iloc[i-2]["low"]),
+                                   float(data.iloc[i+1]["low"]), float(data.iloc[i+2]["low"])):
+            swing_lows.append(float(r["low"]))
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return {"detected": False, "direction": None}
+    close = float(data.iloc[-1]["close"])
+    if swing_lows[-1] < swing_lows[-2] and close > swing_highs[-1]:
+        return {"detected": True, "direction": "bullish"}
+    if swing_highs[-1] > swing_highs[-2] and close < swing_lows[-1]:
+        return {"detected": True, "direction": "bearish"}
+    return {"detected": False, "direction": None}
+
+def _gold_killzone_bonus():
+    """
+    ICT Killzone timing for gold.
+    London Killzone: 07:00-09:00 UTC — highest gold volatility.
+    NY Killzone: 12:00-14:00 UTC — second major move.
+    Returns bonus points.
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    h = now.hour
+    if 7 <= h <= 8:
+        return 8, "London Killzone"
+    elif 12 <= h <= 13:
+        return 8, "NY Killzone"
+    elif 9 <= h <= 11:
+        return 3, "London Session"
+    elif 14 <= h <= 16:
+        return 3, "NY Session"
+    elif 13 <= h <= 14:
+        return 6, "London/NY Overlap"
+    else:
+        return -3, "Off-hours"
+
+def _gold_rsi_divergence(df, direction, lookback=30):
+    """
+    Detect RSI divergence — price making new high/low but RSI not confirming.
+    Bullish div: price lower low + RSI higher low. Bearish div: price higher high + RSI lower high.
+    """
+    if len(df) < lookback:
+        return {"detected": False, "type": None}
+    data = df.tail(lookback)
+    swing_data = []
+    for i in range(2, len(data) - 2):
+        r = data.iloc[i]
+        rsi = float(r.get("rsi14", 50) or 50)
+        is_high = float(r["high"]) >= max(float(data.iloc[i-1]["high"]), float(data.iloc[i+1]["high"]))
+        is_low = float(r["low"]) <= min(float(data.iloc[i-1]["low"]), float(data.iloc[i+1]["low"]))
+        if is_high:
+            swing_data.append({"type": "high", "price": float(r["high"]), "rsi": rsi})
+        if is_low:
+            swing_data.append({"type": "low", "price": float(r["low"]), "rsi": rsi})
+    swing_highs = [s for s in swing_data if s["type"] == "high"]
+    swing_lows = [s for s in swing_data if s["type"] == "low"]
+    if direction == "Buy" and len(swing_lows) >= 2:
+        if (swing_lows[-1]["price"] < swing_lows[-2]["price"] and
+            swing_lows[-1]["rsi"] > swing_lows[-2]["rsi"] + 3):
+            return {"detected": True, "type": "bullish_divergence"}
+    if direction == "Sell" and len(swing_highs) >= 2:
+        if (swing_highs[-1]["price"] > swing_highs[-2]["price"] and
+            swing_highs[-1]["rsi"] < swing_highs[-2]["rsi"] - 3):
+            return {"detected": True, "type": "bearish_divergence"}
+    return {"detected": False, "type": None}
 
 def _gold_momentum_filter(df, direction):
     """
@@ -1819,10 +1972,10 @@ def _gold_candle_quality(df, direction):
 
     return min(10, score)
 
-def gold_engine_score(df, df_h4, direction, base_score, base_grade):
+def gold_engine_score(df, df_h4, df_h1, direction, base_score, base_grade):
     """
-    Gold-specific scoring overlay. Adds professional gold trading filters
-    on top of the base signal score.
+    Gold-specific scoring overlay V2 — Multi-Timeframe + Smart Money hybrid.
+    H4: trend direction. H1: structure & zones. Entry TF: entry signals.
     Returns: (adjusted_score, gold_info_dict, adjusted_grade, extra_warns)
     """
     row   = df.iloc[-1]
@@ -1832,74 +1985,174 @@ def gold_engine_score(df, df_h4, direction, base_score, base_grade):
     extra_warns = []
     gold_info = {}
     bonus = 0
+    confirmations = 0
+    contradictions = 0
 
-    # 1. Asian Range Breakout
+    # ── MODULE 1: Multi-Timeframe Trend Alignment ────────────
+    h4t = _h4_trend(df_h4)
+    h1t = _h4_trend(df_h1) if df_h1 is not None and len(df_h1) >= 50 else "neutral"
+    # Entry TF trend from EMA9/21
+    e9  = float(row.get("ema9", close))
+    e21 = float(row.get("ema21", close))
+    entry_trend = "bull" if e9 > e21 else ("bear" if e9 < e21 else "neutral")
+
+    gold_info["h4_trend"] = h4t
+    gold_info["h1_trend"] = h1t
+    gold_info["entry_trend"] = entry_trend
+
+    # All 3 timeframes aligned = strong bonus
+    dir_lower = "bull" if direction == "Buy" else "bear"
+    h4_ok = dir_lower in h4t
+    h1_ok = dir_lower in h1t
+    entry_ok = entry_trend == dir_lower
+
+    aligned_count = sum([h4_ok, h1_ok, entry_ok])
+    if aligned_count == 3:
+        bonus += 15
+        confirmations += 1
+        gold_info["mtf_alignment"] = "perfect"
+    elif aligned_count == 2:
+        bonus += 8
+        gold_info["mtf_alignment"] = "good"
+    elif aligned_count == 1:
+        bonus += 0
+        gold_info["mtf_alignment"] = "weak"
+        extra_warns.append("⚠ Only 1/3 timeframes aligned — weak setup")
+    else:
+        bonus -= 10
+        contradictions += 1
+        gold_info["mtf_alignment"] = "opposed"
+        extra_warns.append("🚫 All timeframes OPPOSE direction — avoid trade")
+
+    # ── MODULE 2: Supply & Demand Zones ──────────────────────
+    # Use H1 data for better zone detection (wider view)
+    zone_df = df_h1 if df_h1 is not None and len(df_h1) >= 50 else df
+    zones = _gold_supply_demand_zones(zone_df, lookback=80)
+    zone_position = _gold_price_in_zone(close, zones, atr)
+    gold_info["zones"] = {"supply_count": len(zones["supply"]), "demand_count": len(zones["demand"]), "position": zone_position}
+
+    if zone_position == "demand" and direction == "Buy":
+        bonus += 10
+        confirmations += 1
+        extra_warns.append("🏦 Price in DEMAND zone — supports Buy")
+    elif zone_position == "supply" and direction == "Sell":
+        bonus += 10
+        confirmations += 1
+        extra_warns.append("🏦 Price in SUPPLY zone — supports Sell")
+    elif zone_position == "demand" and direction == "Sell":
+        bonus -= 8
+        contradictions += 1
+        extra_warns.append("⚠ Price in DEMAND zone — risky Sell")
+    elif zone_position == "supply" and direction == "Buy":
+        bonus -= 8
+        contradictions += 1
+        extra_warns.append("⚠ Price in SUPPLY zone — risky Buy")
+
+    # ── MODULE 3: Fair Value Gap (FVG) ───────────────────────
+    fvg = _gold_fvg_detection(df, direction, lookback=50)
+    gold_info["fvg"] = fvg
+    if fvg["detected"]:
+        bonus += 8
+        confirmations += 1
+        extra_warns.append(f"📊 FVG detected ({fvg['type']}) near {fvg['level']:.2f}")
+
+    # ── MODULE 4: Change of Character (CHoCH) ────────────────
+    choch = _gold_choch_detection(df, lookback=40)
+    gold_info["choch"] = choch
+    if choch["detected"]:
+        if (choch["direction"] == "bullish" and direction == "Buy") or \
+           (choch["direction"] == "bearish" and direction == "Sell"):
+            bonus += 10
+            confirmations += 1
+            extra_warns.append(f"🔄 CHoCH detected — structure shift {choch['direction']}")
+        else:
+            bonus -= 8
+            contradictions += 1
+            extra_warns.append(f"⚠ CHoCH OPPOSES direction — {choch['direction']} shift detected")
+
+    # ── MODULE 5: ICT Killzone Timing ────────────────────────
+    kz_bonus, kz_name = _gold_killzone_bonus()
+    bonus += kz_bonus
+    gold_info["killzone"] = kz_name
+    if kz_bonus >= 6:
+        confirmations += 1
+        extra_warns.append(f"⏰ {kz_name} active — prime gold trading time")
+    elif kz_bonus < 0:
+        extra_warns.append(f"⚠ {kz_name} — low volatility, avoid gold trades")
+
+    # ── MODULE 6: RSI Divergence ─────────────────────────────
+    rsi_div = _gold_rsi_divergence(df, direction, lookback=30)
+    gold_info["rsi_divergence"] = rsi_div
+    if rsi_div["detected"]:
+        bonus += 8
+        confirmations += 1
+        extra_warns.append(f"📈 RSI Divergence: {rsi_div['type']} — reversal signal")
+
+    # ── MODULE 7: Liquidity Sweep ────────────────────────────
+    sweep = _gold_liquidity_sweep(df, atr)
+    gold_info["sweep"] = sweep
+    if sweep["detected"]:
+        if (sweep["direction"] == "bear" and direction == "Sell") or \
+           (sweep["direction"] == "bull" and direction == "Buy"):
+            bonus += 10
+            confirmations += 1
+            extra_warns.append(f"🏦 Liquidity sweep — institutional {direction.lower()} signal")
+        else:
+            bonus -= 8
+            contradictions += 1
+            extra_warns.append(f"⚠ Liquidity sweep OPPOSES {direction}")
+
+    # ── MODULE 8: Asian Range Breakout ───────────────────────
     asian = _gold_asian_range(df)
     gold_info["asian_range"] = asian
     if asian["valid"]:
         breakout = _gold_breakout_signal(df, asian, atr)
         gold_info["breakout"] = breakout
-        if breakout == "bear_breakout" and direction == "Sell":
-            bonus += 10
-            gold_info["breakout_aligned"] = True
-        elif breakout == "bull_breakout" and direction == "Buy":
-            bonus += 10
-            gold_info["breakout_aligned"] = True
+        if (breakout == "bear_breakout" and direction == "Sell") or \
+           (breakout == "bull_breakout" and direction == "Buy"):
+            bonus += 8
+            confirmations += 1
         elif breakout == "inside":
-            bonus -= 5
+            bonus -= 3
             extra_warns.append("⚠ Gold inside Asian range — wait for breakout")
-            gold_info["breakout_aligned"] = False
-        else:
-            gold_info["breakout_aligned"] = False
-    else:
-        gold_info["breakout"] = "no_data"
-        gold_info["breakout_aligned"] = False
 
-    # 2. Liquidity Sweep Detection
-    sweep = _gold_liquidity_sweep(df, atr)
-    gold_info["sweep"] = sweep
-    if sweep["detected"]:
-        if sweep["direction"] == "bear" and direction == "Sell":
-            bonus += 10
-            extra_warns.append(f"🏦 Liquidity sweep detected above {sweep['sweep_level']:.2f} — institutional sell signal")
-        elif sweep["direction"] == "bull" and direction == "Buy":
-            bonus += 10
-            extra_warns.append(f"🏦 Liquidity sweep detected below {sweep['sweep_level']:.2f} — institutional buy signal")
-        elif sweep["direction"] != direction.lower()[:4]:
-            bonus -= 10
-            extra_warns.append(f"⚠ Liquidity sweep opposes your direction — caution")
-
-    # 3. Gold Momentum Filter
+    # ── MODULE 9: Gold Momentum Filter ───────────────────────
     mom_bonus = _gold_momentum_filter(df, direction)
     gold_info["momentum_bonus"] = mom_bonus
     bonus += mom_bonus
+    if mom_bonus >= 10:
+        confirmations += 1
 
-    # 4. Session Filter — Gold performs best at London/NY overlap
-    sess_name = get_session_now()
-    if "Overlap" in sess_name:
-        bonus += 5
-        gold_info["session_quality"] = "prime"
-    elif "London" in sess_name or "NewYork" in sess_name:
-        bonus += 2
-        gold_info["session_quality"] = "good"
-    elif "Asian" in sess_name:
-        bonus -= 5
-        gold_info["session_quality"] = "range"
-        extra_warns.append("⚠ Gold Asian session — range-bound, avoid breakout trades")
-    else:
-        gold_info["session_quality"] = "off"
-
-    # 5. Overextension check for gold
+    # ── MODULE 10: Overextension Guard ───────────────────────
     if len(df) >= 20:
         c20 = float(df.iloc[-20]["close"])
         move_20 = abs(close - c20)
         if move_20 > atr * 4:
             bonus -= 10
-            extra_warns.append(f"⚠ Gold overextended: moved {move_20:.2f} in 20 bars ({move_20/atr:.1f}× ATR)")
+            contradictions += 1
+            extra_warns.append(f"⚠ Gold overextended: {move_20:.2f} in 20 bars ({move_20/atr:.1f}× ATR)")
 
-    # Calculate adjusted score
-    adjusted_score = min(100, max(0, base_score + bonus))
+    # ── MODULE 11: Market Structure ──────────────────────────
+    structure_ok = _gold_structure_check(df, direction)
+    gold_info["structure_ok"] = structure_ok
+    if structure_ok:
+        bonus += 5
+        confirmations += 1
+    else:
+        bonus -= 5
+        extra_warns.append("⚠ Market structure does not support direction")
+
+    # ── FINAL SCORING ────────────────────────────────────────
+    gold_info["confirmations"] = confirmations
+    gold_info["contradictions"] = contradictions
     gold_info["bonus"] = bonus
+
+    # Safety: if too many contradictions vs confirmations, cap the score
+    if contradictions >= 3 and confirmations < contradictions:
+        bonus = min(bonus, -15)
+        extra_warns.append("🛑 Too many contradicting signals — trade not recommended")
+
+    adjusted_score = min(100, max(0, base_score + bonus))
     gold_info["adjusted_score"] = adjusted_score
 
     # Re-grade with adjusted score
@@ -1930,6 +2183,12 @@ def analyze_symbol(symbol, interval, bars, td_key):
     try:
         df   = add_indicators(fetch_bars(symbol, interval, bars, td_key))
         df_h4= add_indicators(fetch_bars(symbol, "4h", 200, td_key))
+        df_h1 = None
+        if norm(symbol) == "XAUUSD":
+            try:
+                df_h1 = add_indicators(fetch_bars(symbol, "1h", 200, td_key))
+            except Exception:
+                df_h1 = None
     except Exception as e:
         return {"error": str(e), "symbol": symbol}
 
@@ -1944,7 +2203,7 @@ def analyze_symbol(symbol, interval, bars, td_key):
     gold_info = {}
     if norm(symbol) == "XAUUSD":
         score, gold_info, grade, gold_warns = gold_engine_score(
-            df, df_h4, direction, score, grade)
+            df, df_h4, df_h1, direction, score, grade)
         warns.extend(gold_warns)
         bd["Gold Engine"] = gold_info.get("bonus", 0)
 
@@ -1985,7 +2244,7 @@ def analyze_symbol(symbol, interval, bars, td_key):
             grok_result = None
 
     return {
-        "symbol": symbol, "df": df, "df_h4": df_h4,
+        "symbol": symbol, "df": df, "df_h4": df_h4, "df_h1": df_h1,
         "close": close, "atr": atr,
         "direction": direction, "score": score, "bd": bd, "grade": grade, "warns": warns,
         "sl": levels["sl"], "tp1": levels["tp1"], "tp2": levels["tp2"],
@@ -2555,7 +2814,7 @@ def page_overview():
                 f"{a['grade']} ({a['score']})</span>"
                 f"<span style='font-family:Space Mono,monospace;font-size:13px;font-weight:700;color:{dc};'>"
                 f"{'▲' if a['direction']=='Buy' else ('▼' if a['direction']=='Sell' else '◈')} {a['direction']}</span>"
-                f"<span style='font-size:10px;color:#8b9ab0;font-family:Space Mono,monospace;'>AI {grok_ai_r}/10</span>"
+                f"<span style='font-size:10px;color:#8b9ab0;font-family:Space Mono,monospace;'>AI Ref: {grok_ai_r}/10</span>"
                 f"</div>"
                 # Technicals row
                 f"<div style='display:flex;gap:12px;font-size:11px;'>"
@@ -2774,30 +3033,14 @@ def page_symbol(symbol):
         f"{kpi('ATR', fmt_num(a['atr'],cfg_['dec']), '#8b9ab0')}"
         f"{kpi('SESSION', a['session'][:10], sess_col)}"
         f"</div>", unsafe_allow_html=True)
-    _se_type_icon = "🟢" if _se_type == "MARKET" else ("🟡" if _se_type == "LIMIT" else "🔴")
-
-    # Row 2: Smart Entry + trade levels
+    # Row 2: Trade levels
     st.markdown(
         f"<div style='display:flex;gap:6px;margin:0 0 4px;'>"
-        f"{kpi(f'{_se_type_icon} ENTRY ({_se_type})', fmt_price(_se_price,symbol), _se_type_col)}"
+        f"{kpi('ENTRY', fmt_price(a['close'],symbol), '#e8edf2')}"
         f"{kpi('SL', fmt_price(a['sl'],symbol), '#ef4444')}"
         f"{kpi('TP1', fmt_price(a['tp1'],symbol), '#10b981')}"
         f"{kpi('TP2', fmt_price(a['tp2'],symbol), '#84cc16')}"
         f"{kpi('R:R', fmt_num(a['rr'],1)+':1', '#a78bfa')}"
-        f"</div>", unsafe_allow_html=True)
-
-    # Entry Quality bar + reason
-    _eq_bar_col = "#10b981" if _se_quality >= 4 else ("#f59e0b" if _se_quality >= 3 else "#ef4444")
-    _eq_pct = _se_quality * 20
-    st.markdown(
-        f"<div style='background:#0d1117;border:1px solid rgba(255,255,255,0.08);border-radius:8px;"
-        f"padding:8px 12px;margin:0 0 8px;'>"
-        f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;'>"
-        f"<span style='font-size:10px;color:#8b9ab0;font-family:Space Mono,monospace;letter-spacing:.05em;'>ENTRY QUALITY</span>"
-        f"<span style='font-size:12px;color:{_eq_bar_col};font-weight:700;'>{_se_stars}</span></div>"
-        f"<div style='background:rgba(255,255,255,0.06);border-radius:4px;height:6px;margin-bottom:6px;'>"
-        f"<div style='background:{_eq_bar_col};width:{_eq_pct}%;height:100%;border-radius:4px;'></div></div>"
-        f"<div style='font-size:10px;color:#8b9ab0;font-family:Space Mono,monospace;'>{_se_reason}</div>"
         f"</div>", unsafe_allow_html=True)
 
     # Row 3: Risk/Reward in actual currency
@@ -2852,7 +3095,7 @@ def page_symbol(symbol):
 
         # ── Signal alert: Unified score Grade A/A+ ──────────────
         grok_rating = grok.get("ai_rating", 0) if grok and not grok.get("error") else 0
-        _uni_s = int(a["score"] * 0.6 + (grok_rating * 10) * 0.4)
+        _uni_s = a["score"]  # Use calculator score directly, AI is reference only
         _uni_s = max(0, min(100, _uni_s))
         _c_alert = cfg(symbol)
         _uni_triggered = _uni_s >= _c_alert.get("grade_a", 76)
@@ -3185,7 +3428,7 @@ def page_backtest():
         # ── Gold Engine overlay for XAUUSD ────────────────────
         if norm(bt_sym) == "XAUUSD":
             score, _gi, grade, _gw = gold_engine_score(
-                df_sl, df_h4_sync, direction, score, grade)
+                df_sl, df_h4_sync, None, direction, score, grade)
             warns.extend(_gw)
 
         if grade not in allowed_grades:
