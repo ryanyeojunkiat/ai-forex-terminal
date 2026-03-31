@@ -429,15 +429,6 @@ SYMBOL_CONFIG: Dict[str, Dict] = {
                    grade_aplus=88, grade_a=76, grade_b=62, min_rr=2.0,
                    sessions=["London","Overlap","NewYork"], asset_class="oil",
                    note="News-driven. EIA/OPEC events cause spikes. Trade NY session."),
-    # ── CRYPTO ─────────────────────────────────────────────────
-    "BTCUSD": dict(name="Bitcoin",  pip=1.0,    dec=1, atr_sl=1.5, atr_tp1=2.5, atr_tp2=5.0,
-                   grade_aplus=85, grade_a=72, grade_b=58, min_rr=2.0,
-                   sessions=["London","Overlap","NewYork","Asian"], asset_class="crypto",
-                   note="24/7 market. High vol. Best during NY/London overlap."),
-    "ETHUSD": dict(name="Ethereum", pip=0.1,    dec=2, atr_sl=1.5, atr_tp1=2.5, atr_tp2=5.0,
-                   grade_aplus=85, grade_a=72, grade_b=58, min_rr=2.0,
-                   sessions=["London","Overlap","NewYork","Asian"], asset_class="crypto",
-                   note="24/7 market. Correlated with BTC. Watch ETH/BTC ratio."),
 }
 ACTIVE_SYMBOLS = list(SYMBOL_CONFIG.keys())
 
@@ -445,7 +436,7 @@ API_SYMBOL_MAP = {
     "EURUSD":"EUR/USD","GBPUSD":"GBP/USD","USDJPY":"USD/JPY",
     "XAUUSD":"XAU/USD","EURCHF":"EUR/CHF","AUDUSD":"AUD/USD",
     "NZDUSD":"NZD/USD","GBPJPY":"GBP/JPY","EURJPY":"EUR/JPY",
-    "XTIUSD":"XTI/USD","BTCUSD":"BTC/USD","ETHUSD":"ETH/USD",
+    "XTIUSD":"XTI/USD",
 }
 INTERVAL_OPTIONS = {"5 Min":"5min","15 Min":"15min","30 Min":"30min","1 Hour":"1h","4 Hours":"4h"}
 SESSIONS_UTC = {"London":(7,16),"NewYork":(12,21),"Overlap":(12,16),"Asian":(22,7)}
