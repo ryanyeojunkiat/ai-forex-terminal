@@ -1,7 +1,8 @@
 """
-AI FOREX TERMINAL  v13.0
+AI FOREX TERMINAL  v14.0  (Multi-User SaaS Edition)
 Multi-page redesign: Overview · Symbol pages · Trades · Backtest
 Core fixes: H4-first signal engine, ATR-based SL/TP, symbol-specific thresholds
+Auth: Supabase Auth for multi-user, per-user MT5 & trade data
 """
 import os, json, re, uuid
 from dataclasses import dataclass, field
@@ -18,21 +19,31 @@ try:
 except Exception:
     st_autorefresh = None
 
-st.set_page_config(page_title="AI Forex Terminal V14", page_icon="◈",
+st.set_page_config(page_title="Alpha Edge AI Terminal", page_icon="◈",
                    layout="wide", initial_sidebar_state="expanded")
 
 # ============================================================
-# PASSWORD GATE
+# AUTH GATE (Supabase Auth — multi-user)
 # ============================================================
-def _check_password():
-    """Simple password gate. Set APP_PASSWORD in Streamlit secrets or env."""
+try:
+    from auth import render_auth_page, is_logged_in, get_current_user_id, get_current_email, clear_session, sign_out, get_user_settings, save_user_settings
+    _AUTH_AVAILABLE = True
+except ImportError:
+    _AUTH_AVAILABLE = False
+
+def _check_auth():
+    """Multi-user auth gate using Supabase Auth. Falls back to password if auth module unavailable."""
+    if _AUTH_AVAILABLE:
+        render_auth_page()  # blocks with st.stop() if not logged in
+        return True
+    # Fallback: simple password gate
     _pw = os.getenv("APP_PASSWORD", "")
     try:
         _pw = st.secrets.get("APP_PASSWORD", _pw) or _pw
     except Exception:
         pass
     if not _pw:
-        return True  # no password set → open access
+        return True
     if st.session_state.get("_authenticated"):
         return True
     st.markdown("""<style>
@@ -51,7 +62,14 @@ def _check_password():
             st.error("Incorrect password.")
     st.stop()
 
-_check_password()
+_check_auth()
+
+# Helper: get current user ID for per-user data isolation
+def _uid():
+    """Return current user ID for filtering data. Empty string if no auth."""
+    if _AUTH_AVAILABLE and is_logged_in():
+        return get_current_user_id()
+    return ""
 
 # ============================================================
 # CSS
@@ -231,17 +249,45 @@ _ENV_MA_ACCOUNT = _get_secret("METAAPI_ACCOUNT")
 _ENV_SB_URL     = _get_secret("SUPABASE_URL")
 _ENV_SB_KEY     = _get_secret("SUPABASE_KEY")
 
-# Auto-populate session state from secrets on startup (so user never needs to re-enter keys)
+# Auto-populate session state from secrets on startup (shared API keys for all users)
 if _ENV_TD  and not st.session_state.get("td_key"):      st.session_state["td_key"]      = _ENV_TD
 if _ENV_XAI and not st.session_state.get("xai_key"):     st.session_state["xai_key"]     = _ENV_XAI
 if _ENV_TE  and not st.session_state.get("te_key"):      st.session_state["te_key"]      = _ENV_TE
+
+# Per-user MT5 credentials: load from Supabase user_settings on first login
+# (shared/default MT5 only used if no user-specific settings exist)
+def _load_user_mt5_settings():
+    """Load per-user MT5 credentials from Supabase user_settings table."""
+    if not (_AUTH_AVAILABLE and is_logged_in()): return
+    if st.session_state.get("_user_settings_loaded"): return
+    try:
+        uid = get_current_user_id()
+        settings = get_user_settings(uid)
+        if settings:
+            if settings.get("ma_token") and not st.session_state.get("ma_token"):
+                st.session_state["ma_token"] = settings["ma_token"]
+            if settings.get("ma_account") and not st.session_state.get("ma_account"):
+                st.session_state["ma_account"] = settings["ma_account"]
+            if settings.get("ma_sym_suffix"):
+                st.session_state["ma_sym_suffix"] = settings["ma_sym_suffix"]
+            if settings.get("balance"):
+                st.session_state["balance"] = float(settings["balance"])
+            if settings.get("risk_pct"):
+                st.session_state["risk_pct"] = float(settings["risk_pct"])
+    except Exception:
+        pass
+    st.session_state["_user_settings_loaded"] = True
+
+_load_user_mt5_settings()
+
+# Fallback to env MT5 if no per-user settings loaded
 if _ENV_MA_TOKEN   and not st.session_state.get("ma_token"):   st.session_state["ma_token"]   = _ENV_MA_TOKEN
 if _ENV_MA_ACCOUNT and not st.session_state.get("ma_account"): st.session_state["ma_account"] = _ENV_MA_ACCOUNT
 
 JOURNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_journal.json")
 
 # ============================================================
-# SUPABASE DATABASE
+# SUPABASE DATABASE (multi-user: auto-injects user_id)
 # ============================================================
 def _sb_ok(): return bool(_ENV_SB_URL and _ENV_SB_KEY)
 
@@ -254,7 +300,10 @@ def _sb_headers(extra=None):
 def sb_get(table: str, filters: str = "") -> list:
     if not _sb_ok(): return []
     try:
-        url = f"{_ENV_SB_URL}/rest/v1/{table}?select=*" + (f"&{filters}" if filters else "")
+        uid = _uid()
+        uid_filter = f"user_id=eq.{uid}" if uid else ""
+        all_filters = "&".join(f for f in [filters, uid_filter] if f)
+        url = f"{_ENV_SB_URL}/rest/v1/{table}?select=*" + (f"&{all_filters}" if all_filters else "")
         r = requests.get(url, headers=_sb_headers(), timeout=10)
         if r.status_code == 200: return r.json()
     except Exception: pass
@@ -263,6 +312,9 @@ def sb_get(table: str, filters: str = "") -> list:
 def sb_upsert(table: str, data: dict) -> bool:
     if not _sb_ok(): return False
     try:
+        uid = _uid()
+        if uid and "user_id" not in data:
+            data["user_id"] = uid
         h = _sb_headers({"Prefer": "resolution=merge-duplicates,return=minimal"})
         r = requests.post(f"{_ENV_SB_URL}/rest/v1/{table}", headers=h, json=data, timeout=10)
         return r.status_code in (200, 201)
@@ -271,6 +323,9 @@ def sb_upsert(table: str, data: dict) -> bool:
 def sb_insert(table: str, data: dict) -> bool:
     if not _sb_ok(): return False
     try:
+        uid = _uid()
+        if uid and "user_id" not in data:
+            data["user_id"] = uid
         h = _sb_headers({"Prefer": "return=minimal"})
         r = requests.post(f"{_ENV_SB_URL}/rest/v1/{table}", headers=h, json=data, timeout=10)
         return r.status_code in (200, 201)
@@ -279,7 +334,10 @@ def sb_insert(table: str, data: dict) -> bool:
 def sb_delete(table: str, filters: str) -> bool:
     if not _sb_ok(): return False
     try:
-        r = requests.delete(f"{_ENV_SB_URL}/rest/v1/{table}?{filters}",
+        uid = _uid()
+        uid_filter = f"user_id=eq.{uid}" if uid else ""
+        all_filters = "&".join(f for f in [filters, uid_filter] if f)
+        r = requests.delete(f"{_ENV_SB_URL}/rest/v1/{table}?{all_filters}",
                             headers=_sb_headers(), timeout=10)
         return r.status_code in (200, 204)
     except Exception: return False
@@ -3520,7 +3578,20 @@ def page_weekend():
 
 def render_sidebar():
     with st.sidebar:
-        st.markdown("<div style='font-family:Space Mono,monospace;font-size:12px;color:#00d4aa;letter-spacing:.1em;padding:8px 0;'>AI FOREX TERMINAL<br><span style='color:#4a5568;'>V14.0</span></div>", unsafe_allow_html=True)
+        st.markdown("<div style='font-family:Space Mono,monospace;font-size:12px;color:#00d4aa;letter-spacing:.1em;padding:8px 0;'>ALPHA EDGE AI<br><span style='color:#4a5568;'>V14.0 — Multi-User</span></div>", unsafe_allow_html=True)
+
+        # ── User Profile (if authenticated) ──
+        if _AUTH_AVAILABLE and is_logged_in():
+            _email = get_current_email()
+            _short = _email.split("@")[0] if _email else "User"
+            st.markdown(f"<div style='font-size:11px;color:#8b9ab0;font-family:Space Mono,monospace;padding:4px 0;'>👤 {_short}</div>", unsafe_allow_html=True)
+            if st.button("🚪 Logout", key="logout_btn", use_container_width=True):
+                tok = st.session_state.get("auth_access_token", "")
+                if tok:
+                    sign_out(tok)
+                clear_session()
+                st.rerun()
+            st.markdown("---")
 
         # ── Navigation ──
         page_options = ["🏠  Overview","🔮  Pre-Market"] + [f"💱  {s}" for s in ACTIVE_SYMBOLS] + ["📊  Trades & Journal","📈  Performance","🔬  Backtest"]
@@ -3597,6 +3668,20 @@ def render_sidebar():
 
         ma_ok = "✅" if (get_ma_token() and get_ma_account()) else "❌"
         st.markdown(f"<div style='font-size:11px;color:#4a5568;font-family:Space Mono,monospace;'>{ma_ok} MetaApi MT5</div>", unsafe_allow_html=True)
+
+        # Save MT5 settings per-user
+        if _AUTH_AVAILABLE and is_logged_in():
+            if st.button("💾 Save MT5 Settings", key="save_mt5_btn", use_container_width=True):
+                uid = get_current_user_id()
+                ok = save_user_settings(uid, {
+                    "ma_token": st.session_state.get("ma_token", ""),
+                    "ma_account": st.session_state.get("ma_account", ""),
+                    "ma_sym_suffix": st.session_state.get("ma_sym_suffix", ""),
+                })
+                if ok:
+                    st.success("MT5 settings saved!")
+                else:
+                    st.error("Failed to save. Check Supabase user_settings table.")
 
         st.markdown("---")
         st.markdown("<div style='font-size:11px;color:#8b9ab0;font-family:Space Mono,monospace;margin-bottom:4px;'>RISK SETTINGS</div>", unsafe_allow_html=True)
