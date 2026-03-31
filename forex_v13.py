@@ -762,7 +762,7 @@ def _grok(messages, max_tokens=400, temperature=0.25, api_key="", model=""):
                           headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},
                           json={"model":mdl,"messages":messages,"max_tokens":max_tokens,
                                 "temperature":float(max(0.0,min(1.0,temperature)))},
-                          timeout=25)
+                          timeout=15)
         if r.status_code != 200:
             try: msg = r.json().get("error",{}).get("message") or r.text[:120]
             except: msg = r.text[:120]
@@ -937,7 +937,7 @@ RULES:
             "Be brutally honest — bad setups get low ratings."
         )},
         {"role": "user", "content": prompt}
-    ], max_tokens=500, temperature=0.2, api_key=xai_key)
+    ], max_tokens=350, temperature=0.2, api_key=xai_key)
 
     if not raw or raw.startswith("[Grok"):
         return {"ai_rating": 0, "direction": calc_direction, "action": "WAIT",
@@ -3378,7 +3378,21 @@ def page_symbol(symbol):
             f"<span style='font-size:10px;color:#4a5568;margin-left:8px;'>{price_src}</span></div>",
             unsafe_allow_html=True)
     with t3:
-        render_grade_badge(a["grade"], a["score"])
+        # UNIFIED score badge: Calculator 60% + AI 40%
+        _g = a.get("grok")
+        _g_ai = _g.get("ai_rating", 0) if _g and not _g.get("error") else 0
+        _u_score = int(a["score"] * 0.6 + (_g_ai * 10) * 0.4)
+        _u_score = max(0, min(100, _u_score))
+        _g_dir = _g.get("direction", a["direction"]) if _g and not _g.get("error") else a["direction"]
+        if _g_dir != a["direction"] and _g_dir != "Wait":
+            _u_score = max(0, _u_score - 20)
+        _c_u = cfg(symbol)
+        if   _u_score >= _c_u.get("grade_aplus", 88): _u_grade = "A+"
+        elif _u_score >= _c_u.get("grade_a", 76):    _u_grade = "A"
+        elif _u_score >= _c_u.get("grade_b", 62):    _u_grade = "B"
+        elif _u_score >= 45:                           _u_grade = "C"
+        else:                                          _u_grade = "D"
+        render_grade_badge(_u_grade, _u_score)
     with t4:
         mkt_c = "#10b981" if mkt=="LIVE" else "#f59e0b"
         st.markdown(f"<span style='font-family:Space Mono,monospace;font-size:11px;color:{mkt_c};'>{mkt}</span>",unsafe_allow_html=True)
@@ -4576,9 +4590,8 @@ def render_sidebar():
         st.markdown("---")
 
         # ── Auto-refresh ──
-        # K-lines cached 5min, prices cached 3s — refresh at 30s is optimal
         if st_autorefresh:
-            ref_int = st.selectbox("Auto-refresh (s)", [0,30,60,120],
+            ref_int = st.selectbox("Auto-refresh (s)", [0,15,30,60,120],
                                    format_func=lambda x:"Off" if x==0 else f"{x}s",
                                    index=1, key="ref_int")
             if ref_int > 0:
