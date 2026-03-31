@@ -271,7 +271,8 @@ def _load_user_mt5_settings():
     if st.session_state.get("_user_settings_loaded"): return
     try:
         uid = get_current_user_id()
-        settings = get_user_settings(uid)
+        _tok = st.session_state.get("auth_access_token", "")
+        settings = get_user_settings(uid, access_token=_tok)
         if settings:
             if settings.get("ma_token") and not st.session_state.get("ma_token"):
                 st.session_state["ma_token"] = settings["ma_token"]
@@ -3992,11 +3993,12 @@ def render_sidebar():
             # Save MT5 settings per-user
             if st.button("💾 Save MT5 Settings", key="save_mt5_btn", use_container_width=True):
                 uid = get_current_user_id()
+                _access_tok = st.session_state.get("auth_access_token", "")
                 ok = save_user_settings(uid, {
                     "ma_token": st.session_state.get("ma_token", ""),
                     "ma_account": st.session_state.get("ma_account", ""),
                     "ma_sym_suffix": st.session_state.get("ma_sym_suffix", ""),
-                })
+                }, access_token=_access_tok)
                 if ok:
                     st.success("MT5 settings saved!")
                 else:
