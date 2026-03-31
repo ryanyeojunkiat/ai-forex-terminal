@@ -249,6 +249,15 @@ _ENV_MA_ACCOUNT = _get_secret("METAAPI_ACCOUNT")
 _ENV_SB_URL     = _get_secret("SUPABASE_URL")
 _ENV_SB_KEY     = _get_secret("SUPABASE_KEY")
 
+# Owner email — used to identify admin/owner account
+OWNER_EMAIL = "junkiatyeo96@gmail.com"
+
+def _is_owner():
+    """Check if current logged-in user is the platform owner."""
+    if _AUTH_AVAILABLE and is_logged_in():
+        return get_current_email() == OWNER_EMAIL
+    return False
+
 # Auto-populate session state from secrets on startup (shared API keys for all users)
 if _ENV_TD  and not st.session_state.get("td_key"):      st.session_state["td_key"]      = _ENV_TD
 if _ENV_XAI and not st.session_state.get("xai_key"):     st.session_state["xai_key"]     = _ENV_XAI
@@ -280,9 +289,8 @@ def _load_user_mt5_settings():
 
 _load_user_mt5_settings()
 
-# Fallback to env MT5 if no per-user settings loaded
-if _ENV_MA_TOKEN   and not st.session_state.get("ma_token"):   st.session_state["ma_token"]   = _ENV_MA_TOKEN
-if _ENV_MA_ACCOUNT and not st.session_state.get("ma_account"): st.session_state["ma_account"] = _ENV_MA_ACCOUNT
+# Shared MT5 for PRICE DATA (all users get live prices from owner's MT5)
+# Per-user MT5 for TRADING/POSITIONS (only visible to that user via RLS)
 
 JOURNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_journal.json")
 
@@ -291,11 +299,42 @@ JOURNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_j
 # ============================================================
 def _sb_ok(): return bool(_ENV_SB_URL and _ENV_SB_KEY)
 
+_ENV_SB_SERVICE_KEY = _get_secret("SUPABASE_SERVICE_KEY")  # service_role key — bypasses RLS
+
 def _sb_headers(extra=None):
     h = {"apikey": _ENV_SB_KEY, "Authorization": f"Bearer {_ENV_SB_KEY}",
          "Content-Type": "application/json", "Prefer": "return=representation"}
     if extra: h.update(extra)
     return h
+
+def _sb_admin_headers(extra=None):
+    """Headers using service_role key — bypasses RLS for admin/owner queries."""
+    key = _ENV_SB_SERVICE_KEY or _ENV_SB_KEY
+    h = {"apikey": key, "Authorization": f"Bearer {key}",
+         "Content-Type": "application/json", "Prefer": "return=representation"}
+    if extra: h.update(extra)
+    return h
+
+def admin_get_all(table: str, filters: str = "", limit: int = 1000) -> list:
+    """Admin-only: fetch ALL rows from a table (bypasses RLS). Owner only."""
+    if not (_sb_ok() and _is_owner()): return []
+    try:
+        url = f"{_ENV_SB_URL}/rest/v1/{table}?select=*&limit={limit}"
+        if filters: url += f"&{filters}"
+        r = requests.get(url, headers=_sb_admin_headers(), timeout=15)
+        if r.status_code == 200: return r.json()
+    except Exception: pass
+    return []
+
+def admin_get_user_count() -> int:
+    """Get total registered user count from auth.users via user_settings."""
+    if not (_sb_ok() and _is_owner()): return 0
+    try:
+        url = f"{_ENV_SB_URL}/rest/v1/user_settings?select=user_id"
+        r = requests.get(url, headers=_sb_admin_headers(), timeout=10)
+        if r.status_code == 200: return len(r.json())
+    except Exception: pass
+    return 0
 
 def sb_get(table: str, filters: str = "") -> list:
     if not _sb_ok(): return []
@@ -518,8 +557,17 @@ def get_td_key():  return st.session_state.get("td_key","") or _ENV_TD
 def get_xai_key(): return st.session_state.get("xai_key","") or _ENV_XAI
 def get_te_key():  return st.session_state.get("te_key","")  or _ENV_TE
 def get_grok_model(): return st.session_state.get("grok_model", _GROK_MODELS[0])
-def get_ma_token():   return st.session_state.get("ma_token","") or _ENV_MA_TOKEN
-def get_ma_account(): return st.session_state.get("ma_account","") or _ENV_MA_ACCOUNT
+# Shared MT5 for PRICE DATA — all users see live prices via owner's MT5
+def get_ma_token_price():   return _ENV_MA_TOKEN or ""
+def get_ma_account_price(): return _ENV_MA_ACCOUNT or ""
+
+# Per-user MT5 for TRADING — owner gets env fallback, others need own credentials
+def get_ma_token():
+    user_tok = st.session_state.get("ma_token", "")
+    return user_tok or (_ENV_MA_TOKEN if _is_owner() else "")
+def get_ma_account():
+    user_acc = st.session_state.get("ma_account", "")
+    return user_acc or (_ENV_MA_ACCOUNT if _is_owner() else "")
 
 def fmt_price(v, sym=""):
     if v is None or (isinstance(v,float) and pd.isna(v)): return "—"
@@ -778,6 +826,130 @@ def get_ai_analysis(symbol, direction, score, grade, entry, sl, tp1, tp2,
            f"→ Is this a valid {direction} setup? Key risks? 3-4 sentences max.")
     return _grok([{"role":"system","content":"You are a professional forex risk manager. Be direct."},
                   {"role":"user","content":msg}], max_tokens=300, temperature=0.3, api_key=key) or "No response."
+
+# ============================================================
+# GROK-PRIMARY SIGNAL ENGINE — AI decides, Calculator backs up
+# ============================================================
+@st.cache_data(ttl=120)
+def grok_primary_analysis(symbol, close, atr, rsi, macd_val, macd_hist,
+                          ema20, ema50, ema200, h4_trend, session_name,
+                          calc_direction, calc_score, calc_grade,
+                          sl_calc, tp1_calc, tp2_calc,
+                          last_10_bars_str, xai_key, bb_upper=0, bb_lower=0):
+    """
+    GROK-PRIMARY: Grok receives ALL technical data + calculator score,
+    then makes the FINAL trading decision with its own AI Rating.
+    Returns dict with: ai_rating, direction, action, entry, sl, tp1, tp2,
+    reasoning, confidence, key_factors
+    """
+    if not xai_key:
+        return {"ai_rating": 0, "direction": calc_direction, "action": "WAIT",
+                "reasoning": "No xAI key — using calculator only.", "confidence": "LOW",
+                "key_factors": [], "error": True}
+
+    c = cfg(symbol)
+    sym_name = c.get("name", symbol)
+    asset_class = c.get("asset_class", "forex")
+    pip_size = c.get("pip", 0.0001)
+    dec = c.get("dec", 5)
+
+    # Build time context
+    now_utc = pd.Timestamp.utcnow()
+    utc_str = now_utc.strftime("%Y-%m-%d %H:%M UTC")
+    day_of_week = now_utc.strftime("%A")
+
+    prompt = f"""You are an elite institutional forex & commodities trader with 20 years of experience.
+You have access to REAL technical data below. Combine this with your knowledge of:
+- Current global macro environment, central bank policies, geopolitical events
+- Typical price behavior patterns for {sym_name} ({asset_class})
+- Session liquidity ({session_name}), day-of-week effects ({day_of_week})
+- News impact, risk-on/risk-off sentiment, intermarket correlations
+
+═══ TECHNICAL DATA FOR {symbol} ═══
+Time: {utc_str} ({day_of_week})
+Session: {session_name}
+Asset: {sym_name} ({asset_class})
+
+PRICE: {close:.{dec}f}
+ATR(14): {atr:.{dec}f}
+RSI(14): {rsi:.1f}
+MACD: {macd_val:.{dec}f} | Histogram: {macd_hist:.{dec}f}
+EMA20: {ema20:.{dec}f} | EMA50: {ema50:.{dec}f} | EMA200: {ema200:.{dec}f}
+Bollinger Upper: {bb_upper:.{dec}f} | Lower: {bb_lower:.{dec}f}
+H4 Trend: {h4_trend}
+
+CALCULATOR BACKUP (rule-based):
+Direction: {calc_direction} | Score: {calc_score}/100 | Grade: {calc_grade}
+SL: {sl_calc:.{dec}f} | TP1: {tp1_calc:.{dec}f} | TP2: {tp2_calc:.{dec}f}
+
+LAST 10 CANDLES:
+{last_10_bars_str}
+
+═══ YOUR TASK ═══
+Analyze ALL the above + your macro/news knowledge. Return ONLY valid JSON:
+{{
+  "ai_rating": <1-10 scale: 1=terrible, 5=neutral, 8=strong, 10=perfect setup>,
+  "direction": "BUY" or "SELL" or "WAIT",
+  "action": "STRONG BUY" or "BUY" or "WAIT" or "SELL" or "STRONG SELL",
+  "entry": <optimal entry price>,
+  "sl": <stop loss price>,
+  "tp1": <take profit 1>,
+  "tp2": <take profit 2>,
+  "confidence": "HIGH" or "MEDIUM" or "LOW",
+  "reasoning": "<2-3 sentence analysis combining technicals + fundamentals>",
+  "key_factors": ["factor1", "factor2", "factor3"],
+  "news_impact": "<1 sentence on current news/macro affecting this pair>",
+  "agrees_with_calculator": true or false,
+  "risk_warning": "<1 sentence if any major risk>"
+}}
+
+RULES:
+- ai_rating 8+ = strong trade, 6-7 = decent, 5 = neutral, below 5 = avoid
+- If session is off-peak, reduce rating by 1-2 points
+- If major news event within 2h, add risk_warning
+- Be HONEST — if no clear setup, say WAIT. Don't force trades.
+- Entry/SL/TP must be realistic based on ATR and current price
+"""
+
+    raw = _grok([
+        {"role": "system", "content": (
+            "You are an elite institutional trader. Return ONLY valid JSON. "
+            "No markdown, no code blocks, no explanation outside JSON. "
+            "Be brutally honest — bad setups get low ratings."
+        )},
+        {"role": "user", "content": prompt}
+    ], max_tokens=500, temperature=0.2, api_key=xai_key)
+
+    if not raw or raw.startswith("[Grok"):
+        return {"ai_rating": 0, "direction": calc_direction, "action": "WAIT",
+                "reasoning": raw or "Grok error", "confidence": "LOW",
+                "key_factors": [], "error": True}
+
+    try:
+        cleaned = re.sub(r"```json|```", "", raw).strip()
+        result = json.loads(cleaned)
+        # Normalize direction
+        d = result.get("direction", "WAIT").upper()
+        result["direction"] = "Buy" if d in ("BUY","LONG") else ("Sell" if d in ("SELL","SHORT") else "Wait")
+        # Ensure numeric fields
+        result["ai_rating"] = max(1, min(10, int(result.get("ai_rating", 5))))
+        for k in ("entry", "sl", "tp1", "tp2"):
+            if k in result:
+                result[k] = float(result[k])
+            else:
+                # Fallback to calculator values
+                result[k] = {"entry": close, "sl": sl_calc, "tp1": tp1_calc, "tp2": tp2_calc}[k]
+        result["error"] = False
+        # Add calculator comparison
+        result["calc_score"] = calc_score
+        result["calc_grade"] = calc_grade
+        result["calc_direction"] = calc_direction
+        return result
+    except Exception as e:
+        return {"ai_rating": 5, "direction": calc_direction, "action": "WAIT",
+                "reasoning": f"Parse error: {raw[:200]}", "confidence": "LOW",
+                "key_factors": [], "error": True,
+                "calc_score": calc_score, "calc_grade": calc_grade, "calc_direction": calc_direction}
 
 def get_ai_trade_advice(trade: dict, live_price: float, analysis: dict, news: dict) -> str:
     """
@@ -1836,21 +2008,51 @@ def analyze_symbol(symbol, interval, bars, td_key):
         levels = compute_levels(close, direction, atr, symbol, df=df)
     sess_ok_, sess_name = session_ok(symbol)
 
+    rsi_val = float(row.get("rsi14",50) or 50)
+    macd_hist_val = float(row.get("macd_hist",0) or 0)
+    macd_val = float(row.get("macd",0) or 0)
+    ema20_val = float(row.get("ema20",close))
+    ema50_val = float(row.get("ema50",close))
+    ema200_val = float(row.get("ema200",close))
+    bb_upper = float(row.get("bb_upper",0) or 0)
+    bb_lower = float(row.get("bb_lower",0) or 0)
+
+    # ── GROK PRIMARY ANALYSIS ─────────────────────────────────
+    # Feed ALL technical data to Grok, get AI-driven trading decision
+    grok_result = None
+    xai_key = get_xai_key()
+    if xai_key:
+        try:
+            last_10 = df[["open","high","low","close"]].tail(10).round(cfg(symbol)["dec"]).to_string(index=False)
+            grok_result = grok_primary_analysis(
+                symbol=symbol, close=close, atr=atr, rsi=rsi_val,
+                macd_val=macd_val, macd_hist=macd_hist_val,
+                ema20=ema20_val, ema50=ema50_val, ema200=ema200_val,
+                h4_trend=_h4_trend(df_h4), session_name=sess_name,
+                calc_direction=direction, calc_score=score, calc_grade=grade,
+                sl_calc=levels["sl"], tp1_calc=levels["tp1"], tp2_calc=levels["tp2"],
+                last_10_bars_str=last_10, xai_key=xai_key,
+                bb_upper=bb_upper, bb_lower=bb_lower,
+            )
+        except Exception:
+            grok_result = None
+
     return {
         "symbol": symbol, "df": df, "df_h4": df_h4,
         "close": close, "atr": atr,
         "direction": direction, "score": score, "bd": bd, "grade": grade, "warns": warns,
         "sl": levels["sl"], "tp1": levels["tp1"], "tp2": levels["tp2"],
         "rr": levels["rr"], "sl_d": levels["sl_d"],
-        "rsi": float(row.get("rsi14",50) or 50),
-        "macd_hist": float(row.get("macd_hist",0) or 0),
-        "ema20": float(row.get("ema20",close)),
-        "ema50": float(row.get("ema50",close)),
-        "ema200": float(row.get("ema200",close)),
+        "rsi": rsi_val,
+        "macd_hist": macd_hist_val,
+        "ema20": ema20_val,
+        "ema50": ema50_val,
+        "ema200": ema200_val,
         "session": sess_name, "session_ok": sess_ok_,
         "h4_trend": _h4_trend(df_h4),
         "spike": spike_info,
         "gold": gold_info,
+        "grok": grok_result,  # NEW: Grok-primary AI analysis
         "error": None,
     }
 
@@ -2097,7 +2299,7 @@ def render_trade_tracker(symbol, current_price, a=None, td_key=""):
             gc_   = grade_color(t.get("locked_grade","?"))
 
             # Live price (always for this trade's symbol)
-            tick = fetch_mt5_price(symbol, get_ma_token(), get_ma_account()) if (get_ma_token() and get_ma_account()) else None
+            tick = fetch_mt5_price(symbol, get_ma_token_price(), get_ma_account_price()) if (get_ma_token_price() and get_ma_account_price()) else None
             live = tick["bid"] if tick else current_price
             plabel = f"MT5 {fmt_price(live,symbol)}" if tick else "TD~"
             pcol   = "#00d4aa" if tick else "#f59e0b"
@@ -2373,7 +2575,7 @@ def page_overview():
             mkt_col = "#10b981" if mkt in ("LIVE","24/7") else "#f59e0b"
             sess_col= "#10b981" if a["session_ok"] else "#4a5568"
             # MT5 price if available
-            tick = fetch_mt5_price(sym, get_ma_token(), get_ma_account())
+            tick = fetch_mt5_price(sym, get_ma_token_price(), get_ma_account_price())
             price = tick["bid"] if tick else a["close"]
             price_src = "MT5" if tick else "TD"
 
@@ -2401,30 +2603,83 @@ def page_overview():
                     f"padding:3px 8px;font-size:10px;color:{sp_col};font-family:Space Mono,monospace;"
                     f"margin-top:4px;'>{sp_info['message']}</div>")
 
+            # ── GROK PRIMARY display ──────────────────────────────
+            grok = a.get("grok")
+            if grok and not grok.get("error"):
+                ai_r = grok.get("ai_rating", 0)
+                ai_dir = grok.get("direction", a["direction"])
+                ai_action = grok.get("action", "WAIT")
+                ai_conf = grok.get("confidence", "LOW")
+                # AI Rating color
+                ai_col = "#10b981" if ai_r >= 7 else ("#f59e0b" if ai_r >= 5 else "#ef4444")
+                ai_dc  = "#10b981" if ai_dir=="Buy" else ("#ef4444" if ai_dir=="Sell" else "#8b9ab0")
+                # Confidence badge
+                conf_col = "#10b981" if ai_conf=="HIGH" else ("#f59e0b" if ai_conf=="MEDIUM" else "#4a5568")
+                # Agreement badge
+                agrees = grok.get("agrees_with_calculator", ai_dir == a["direction"])
+                agree_html = (f"<span style='font-size:9px;color:#10b981;background:rgba(16,185,129,0.1);"
+                              f"padding:1px 6px;border-radius:3px;border:1px solid rgba(16,185,129,0.3);'>"
+                              f"CALC AGREES</span>" if agrees else
+                              f"<span style='font-size:9px;color:#f59e0b;background:rgba(245,158,11,0.1);"
+                              f"padding:1px 6px;border-radius:3px;border:1px solid rgba(245,158,11,0.3);'>"
+                              f"CALC DIFFERS ({a['direction']} {a['score']}/100)</span>")
+                # News impact
+                news_html = ""
+                news_imp = grok.get("news_impact","")
+                if news_imp:
+                    news_html = f"<div style='font-size:10px;color:#a78bfa;margin-top:4px;font-family:Space Mono,monospace;'>📰 {news_imp}</div>"
+                # Risk warning
+                risk_html = ""
+                risk_warn = grok.get("risk_warning","")
+                if risk_warn and risk_warn.lower() != "none":
+                    risk_html = f"<div style='font-size:10px;color:#f59e0b;margin-top:3px;font-family:Space Mono,monospace;'>⚠ {risk_warn}</div>"
+            else:
+                # Fallback: no Grok data, use calculator
+                ai_r = round(a["score"]/10)
+                ai_dir = a["direction"]
+                ai_action = a["direction"]
+                ai_col = gc
+                ai_dc = dc
+                conf_col = "#4a5568"
+                agree_html = ""
+                news_html = ""
+                risk_html = ""
+
             st.markdown(
                 f"<div style='background:#0d1117;border:1px solid {'rgba(239,68,68,0.3)' if sp_info.get('alert_level') == 'danger' else 'rgba(255,255,255,0.07)'};border-radius:10px;"
                 f"padding:14px 16px;margin-bottom:12px;cursor:pointer;"
                 f"{'animation:alertpulse 2s infinite;' if sp_info.get('alert_level') == 'danger' else ''}'>"
+                # Header: Symbol + Market status
                 f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;'>"
                 f"<span style='font-family:Space Mono,monospace;font-size:14px;font-weight:700;color:#e8edf2;'>{sym}</span>"
                 f"<span style='font-size:10px;color:{mkt_col};font-family:Space Mono,monospace;'>{mkt}</span></div>"
+                # Price
                 f"<div style='font-family:Space Mono,monospace;font-size:20px;font-weight:700;color:#e8edf2;margin-bottom:8px;'>{fmt_price(price,sym)}"
                 f"<span style='font-size:10px;color:#4a5568;margin-left:4px;'>{price_src}</span></div>"
+                # AI Rating (PRIMARY) + Direction
                 f"<div style='display:flex;gap:8px;align-items:center;margin-bottom:6px;'>"
-                f"<span style='font-family:Space Mono,monospace;font-size:13px;font-weight:700;color:{dc};'>"
-                f"{'▲' if a['direction']=='Buy' else ('▼' if a['direction']=='Sell' else '◈')} {a['direction']}</span>"
-                f"<span style='font-family:Space Mono,monospace;font-size:15px;font-weight:700;color:{gc};"
-                f"background:rgba(255,255,255,0.04);padding:2px 10px;border-radius:4px;border:1px solid {gc};'>{a['grade']}</span>"
-                f"<span style='font-size:11px;color:#8b9ab0;'>{a['score']}/100</span></div>"
+                f"<span style='font-family:Space Mono,monospace;font-size:22px;font-weight:900;color:{ai_col};"
+                f"background:rgba(255,255,255,0.04);padding:2px 12px;border-radius:6px;border:2px solid {ai_col};'>"
+                f"AI {ai_r}/10</span>"
+                f"<span style='font-family:Space Mono,monospace;font-size:13px;font-weight:700;color:{ai_dc};'>"
+                f"{'▲' if ai_dir=='Buy' else ('▼' if ai_dir=='Sell' else '◈')} {ai_action}</span>"
+                f"<span style='font-size:10px;color:{conf_col};font-family:Space Mono,monospace;'>{grok.get('confidence','') if grok and not grok.get('error') else ''}</span>"
+                f"</div>"
+                # Calculator backup + Agreement badge
+                f"<div style='display:flex;gap:8px;align-items:center;margin-bottom:6px;'>"
+                f"<span style='font-size:10px;color:#4a5568;font-family:Space Mono,monospace;'>"
+                f"Calc: {a['grade']} {a['score']}/100 {a['direction']}</span> {agree_html}</div>"
+                # Technicals row
                 f"<div style='display:flex;gap:12px;font-size:11px;'>"
                 f"<span style='color:#8b9ab0;'>H4: <span style='color:#e8edf2;'>{a['h4_trend']}</span></span>"
                 f"<span style='color:#8b9ab0;'>RSI: <span style='color:#e8edf2;'>{fmt_num(a['rsi'],1)}</span></span>"
                 f"<span style='color:{sess_col};'>{a['session']}</span></div>"
+                # Levels row
                 f"<div style='display:flex;gap:12px;font-size:11px;margin-top:4px;'>"
                 f"<span class='muted'>SL <b style='color:#ef4444;'>{fmt_price(a['sl'],sym)}</b></span>"
                 f"<span class='muted'>TP1 <b style='color:#10b981;'>{fmt_price(a['tp1'],sym)}</b></span>"
                 f"<span class='muted'>R:R <b style='color:#a78bfa;'>{fmt_num(a['rr'],1)}:1</b></span></div>"
-                + bias_html + spike_html +
+                + news_html + risk_html + bias_html + spike_html +
                 f"</div>",
                 unsafe_allow_html=True)
             if a["warns"]:
@@ -2466,7 +2721,7 @@ def page_symbol(symbol):
         return
 
     # MT5 live price
-    tick  = fetch_mt5_price(symbol, get_ma_token(), get_ma_account())
+    tick  = fetch_mt5_price(symbol, get_ma_token_price(), get_ma_account_price())
     price = tick["bid"] if tick else a["close"]
 
     # ── Recalculate SL/TP if live price differs from cached close ──
@@ -2498,6 +2753,53 @@ def page_symbol(symbol):
     with t4:
         mkt_c = "#10b981" if mkt=="LIVE" else "#f59e0b"
         st.markdown(f"<span style='font-family:Space Mono,monospace;font-size:11px;color:{mkt_c};'>{mkt}</span>",unsafe_allow_html=True)
+
+    # ── GROK AI PRIMARY PANEL ────────────────────────────────
+    grok = a.get("grok")
+    if grok and not grok.get("error"):
+        ai_r = grok.get("ai_rating", 0)
+        ai_dir = grok.get("direction", a["direction"])
+        ai_action = grok.get("action", "WAIT")
+        ai_conf = grok.get("confidence", "LOW")
+        ai_col = "#10b981" if ai_r >= 7 else ("#f59e0b" if ai_r >= 5 else "#ef4444")
+        ai_dc  = "#10b981" if ai_dir=="Buy" else ("#ef4444" if ai_dir=="Sell" else "#8b9ab0")
+        conf_col = "#10b981" if ai_conf=="HIGH" else ("#f59e0b" if ai_conf=="MEDIUM" else "#4a5568")
+        border_col = ai_col
+        agrees = grok.get("agrees_with_calculator", ai_dir == a["direction"])
+
+        # Main AI panel
+        reasoning = grok.get("reasoning", "")
+        key_factors = grok.get("key_factors", [])
+        news_imp = grok.get("news_impact", "")
+        risk_warn = grok.get("risk_warning", "")
+        factors_html = "".join(f"<span style='font-size:10px;color:#a78bfa;background:rgba(167,139,250,0.1);"
+                               f"padding:2px 8px;border-radius:3px;margin-right:6px;'>{f}</span>" for f in key_factors[:4])
+
+        st.markdown(
+            f"<div style='background:linear-gradient(135deg,rgba(13,17,23,0.95),rgba(0,212,170,0.03));"
+            f"border:2px solid {border_col};border-radius:12px;padding:16px 20px;margin:12px 0;'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;'>"
+            f"<span style='font-family:Space Mono,monospace;font-size:11px;color:#00d4aa;letter-spacing:.15em;'>◈ GROK AI PRIMARY ANALYSIS</span>"
+            f"<span style='font-size:10px;color:{conf_col};font-family:Space Mono,monospace;"
+            f"background:rgba(255,255,255,0.04);padding:2px 8px;border-radius:3px;'>{ai_conf} CONFIDENCE</span></div>"
+            # AI Rating big
+            f"<div style='display:flex;gap:16px;align-items:center;margin-bottom:12px;'>"
+            f"<span style='font-family:Space Mono,monospace;font-size:36px;font-weight:900;color:{ai_col};'>"
+            f"{ai_r}<span style='font-size:16px;color:#4a5568;'>/10</span></span>"
+            f"<div>"
+            f"<div style='font-family:Space Mono,monospace;font-size:16px;font-weight:700;color:{ai_dc};'>"
+            f"{'▲' if ai_dir=='Buy' else ('▼' if ai_dir=='Sell' else '◈')} {ai_action}</div>"
+            f"<div style='font-size:11px;color:#4a5568;margin-top:2px;'>Calculator: {a['grade']} {a['score']}/100 "
+            f"{'✅ Agrees' if agrees else '⚠ Differs ('+a['direction']+')'}</div></div></div>"
+            # Reasoning
+            f"<div style='font-size:12px;color:#e8edf2;margin-bottom:10px;line-height:1.5;'>{reasoning}</div>"
+            # Key factors
+            f"<div style='margin-bottom:8px;'>{factors_html}</div>"
+            # News + Risk
+            + (f"<div style='font-size:11px;color:#a78bfa;margin-bottom:4px;'>📰 {news_imp}</div>" if news_imp else "")
+            + (f"<div style='font-size:11px;color:#f59e0b;'>⚠ {risk_warn}</div>" if risk_warn and risk_warn.lower() != "none" else "")
+            + f"</div>",
+            unsafe_allow_html=True)
 
     # ── Warnings ─────────────────────────────────────────────
     if a["warns"]:
@@ -2608,9 +2910,9 @@ def page_symbol(symbol):
         f"</div>", unsafe_allow_html=True)
 
     # ── Chart — full width for mobile ─────────────────────────
-    positions = fetch_mt5_positions(get_ma_token(), get_ma_account())
+    positions = fetch_mt5_positions(get_ma_token(), get_ma_account()) if (_is_owner() or get_ma_token()) else []
     sym_pos = [p for p in positions if norm(p.get("symbol","")).replace(".R","") == symbol]
-    if sym_pos:
+    if sym_pos and _is_owner():
         st.markdown("<div style='font-size:11px;color:#00d4aa;font-family:Space Mono,monospace;margin-bottom:4px;'>📡 MT5 POSITIONS</div>", unsafe_allow_html=True)
         rows = []
         for p in sym_pos:
@@ -2637,13 +2939,17 @@ def page_symbol(symbol):
     col_l, col_r = st.columns([1, 1])
 
     with col_l:
-        # Score breakdown
-        render_score_breakdown(a["bd"], a["score"], a["grade"])
+        # Score breakdown (calculator backup)
+        with st.expander("📊 Calculator Breakdown (Backup)", expanded=False):
+            render_score_breakdown(a["bd"], a["score"], a["grade"])
 
-        # ── Signal alert for A / A+ grades (AI-verified) ──────
-        alert_key    = f"_alerted_{symbol}_{a['grade']}_{a['direction']}_{a['score']}"
+        # ── Signal alert: Grok AI Rating 8+ OR Grade A/A+ ──────
+        grok_rating = grok.get("ai_rating", 0) if grok and not grok.get("error") else 0
+        grok_triggered = grok_rating >= 8
+        calc_triggered = a["grade"] in ("A+", "A")
+        alert_key    = f"_alerted_{symbol}_{a['grade']}_{a['direction']}_{a['score']}_{grok_rating}"
         ai_vfy_key   = f"_ai_vfy_{symbol}_{a['grade']}_{a['direction']}_{a['score']}"
-        if a["grade"] in ("A+","A") and not st.session_state.get(alert_key):
+        if (grok_triggered or calc_triggered) and not st.session_state.get(alert_key):
             # Run AI verification once per unique signal
             if ai_vfy_key not in st.session_state:
                 with st.spinner("🤖 AI verifying signal…"):
@@ -2655,11 +2961,12 @@ def page_symbol(symbol):
                 # Log to signals DB
                 log_signal_to_db(symbol, a["direction"], a["grade"], a["score"],
                                  True, a.get("session","?"), a.get("rsi",50), a.get("h4_trend","?"))
+                _grok_label = f" | AI Rating: {grok_rating}/10" if grok_rating else ""
                 st.markdown(
                     f"<div style='background:rgba(0,212,170,0.1);border:1px solid #00d4aa;"
                     f"border-left:3px solid #00d4aa;border-radius:6px;padding:8px 12px;margin:6px 0;"
                     f"font-size:12px;color:#00d4aa;font-family:Space Mono,monospace;animation:alertpulse 1.5s 3;'>"
-                    f"🔔 {a['grade']} SIGNAL — AI CONFIRMED ✅ — {a['direction']} {symbol} ({a['score']}/100)"
+                    f"🔔 SIGNAL — AI CONFIRMED ✅ — {a['direction']} {symbol} (Calc: {a['grade']} {a['score']}/100{_grok_label})"
                     f"</div>", unsafe_allow_html=True)
             else:
                 st.session_state[alert_key] = True  # mark as handled, no alert
@@ -2741,7 +3048,7 @@ def page_trades():
         rows = []
         for t in trades:
             sym = t.get("symbol","?")
-            tick = fetch_mt5_price(sym, get_ma_token(), get_ma_account())
+            tick = fetch_mt5_price(sym, get_ma_token_price(), get_ma_account_price())
             live = tick["bid"] if tick else float(t["entry"])
             risk = abs(float(t["entry"])-float(t["sl"]))
             move = (live-float(t["entry"])) if t["direction"]=="Buy" else (float(t["entry"])-live)
@@ -2755,10 +3062,10 @@ def page_trades():
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-    # ── MT5 live positions ────────────────────────────────────
+    # ── MT5 live positions (owner only) ────────────────────────────────────
     st.markdown("---")
-    positions = fetch_mt5_positions(get_ma_token(), get_ma_account())
-    if positions:
+    positions = fetch_mt5_positions(get_ma_token(), get_ma_account()) if (_is_owner() or get_ma_token()) else []
+    if positions and _is_owner():
         st.markdown("<div class='mono-title' style='font-size:12px;'>📡 MT5 LIVE POSITIONS</div>", unsafe_allow_html=True)
         pos_rows = []
         total_pnl = 0
@@ -3275,8 +3582,9 @@ def page_performance():
         st.warning("Supabase not connected. Add SUPABASE_URL and SUPABASE_KEY to your secrets.")
         return
 
-    # ── Import MT5 History via MetaApi ────────────────────────
-    with st.expander("📥 Import MT5 History (one-time setup)"):
+    # ── Import MT5 History via MetaApi (owner only) ────────────
+    if _is_owner() or get_ma_token():
+      with st.expander("📥 Import MT5 History (one-time setup)"):
         st.markdown("<div style='font-size:12px;color:#8b9ab0;margin-bottom:8px;'>"
                     "Click the button below to import your complete MT5 trade history "
                     "directly from MetaApi. This only needs to be done once.</div>",
@@ -3642,35 +3950,40 @@ def render_sidebar():
         st.markdown("---")
         st.markdown("<div style='font-size:11px;color:#00d4aa;font-family:Space Mono,monospace;margin-bottom:4px;'>MT5 LIVE (MetaApi)</div>", unsafe_allow_html=True)
 
-        _ma_tok = st.text_input("MetaApi Token", value=st.session_state.get("ma_token",""),
-                                type="password", key="ma_tok_inp")
-        _ma_acc = st.text_input("Account ID", value=st.session_state.get("ma_account",""), key="ma_acc_inp")
-        _ma_sfx = st.text_input("Symbol suffix", value=st.session_state.get("ma_sym_suffix",""),
-                                key="ma_sfx_inp", placeholder=".r for FP Markets Raw")
-        if _ma_tok: st.session_state["ma_token"]     = _ma_tok
-        if _ma_acc: st.session_state["ma_account"]   = _ma_acc
-        st.session_state["ma_sym_suffix"] = _ma_sfx
+        # MT5 live prices powered by platform — show status to all users
+        _price_connected = bool(get_ma_token_price() and get_ma_account_price())
+        st.markdown(f"<div style='font-size:11px;color:#4a5568;font-family:Space Mono,monospace;'>{'✅' if _price_connected else '❌'} Live MT5 Prices</div>", unsafe_allow_html=True)
 
-        mab1, mab2 = st.columns(2)
-        if mab1.button("🔌 Test MT5"):
-            with st.spinner("Testing..."):
-                ok, msg = test_mt5_connection(get_ma_token(), get_ma_account())
-            st.session_state["ma_test_result"] = (ok, msg)
-        if mab2.button("▶ Deploy"):
-            with st.spinner("Deploying..."):
-                ok, msg = deploy_mt5_account(get_ma_token(), get_ma_account())
-            st.session_state["ma_test_result"] = (ok, msg)
+        # MT5 credentials management — OWNER ONLY
+        if _is_owner():
+            _ma_tok = st.text_input("MetaApi Token", value=st.session_state.get("ma_token",""),
+                                    type="password", key="ma_tok_inp")
+            _ma_acc = st.text_input("Account ID", value=st.session_state.get("ma_account",""), key="ma_acc_inp")
+            _ma_sfx = st.text_input("Symbol suffix", value=st.session_state.get("ma_sym_suffix",""),
+                                    key="ma_sfx_inp", placeholder=".r for FP Markets Raw")
+            if _ma_tok: st.session_state["ma_token"]     = _ma_tok
+            if _ma_acc: st.session_state["ma_account"]   = _ma_acc
+            st.session_state["ma_sym_suffix"] = _ma_sfx
 
-        # Persist test/deploy result so it doesn't disappear on rerun
-        if "ma_test_result" in st.session_state:
-            ok, msg = st.session_state["ma_test_result"]
-            (st.success if ok else st.error)(msg)
+            mab1, mab2 = st.columns(2)
+            if mab1.button("🔌 Test MT5"):
+                with st.spinner("Testing..."):
+                    ok, msg = test_mt5_connection(get_ma_token(), get_ma_account())
+                st.session_state["ma_test_result"] = (ok, msg)
+            if mab2.button("▶ Deploy"):
+                with st.spinner("Deploying..."):
+                    ok, msg = deploy_mt5_account(get_ma_token(), get_ma_account())
+                st.session_state["ma_test_result"] = (ok, msg)
 
-        ma_ok = "✅" if (get_ma_token() and get_ma_account()) else "❌"
-        st.markdown(f"<div style='font-size:11px;color:#4a5568;font-family:Space Mono,monospace;'>{ma_ok} MetaApi MT5</div>", unsafe_allow_html=True)
+            # Persist test/deploy result so it doesn't disappear on rerun
+            if "ma_test_result" in st.session_state:
+                ok, msg = st.session_state["ma_test_result"]
+                (st.success if ok else st.error)(msg)
 
-        # Save MT5 settings per-user
-        if _AUTH_AVAILABLE and is_logged_in():
+            ma_ok = "✅" if (get_ma_token() and get_ma_account()) else "❌"
+            st.markdown(f"<div style='font-size:11px;color:#4a5568;font-family:Space Mono,monospace;'>{ma_ok} MetaApi MT5 (Owner)</div>", unsafe_allow_html=True)
+
+            # Save MT5 settings per-user
             if st.button("💾 Save MT5 Settings", key="save_mt5_btn", use_container_width=True):
                 uid = get_current_user_id()
                 ok = save_user_settings(uid, {
