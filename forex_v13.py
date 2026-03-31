@@ -2489,18 +2489,92 @@ def gold_engine_score(df, df_h4, direction, base_score, base_grade):
             bonus -= 10
             extra_warns.append(f"⚠ Gold overextended: {move_20:.2f} in 20 bars ({move_20/atr:.1f}× ATR)")
 
+    # ═══ 12. TREND STRENGTH OVERRIDE — don't fight strong trends ═══
+    # If gold is in a strong one-directional move, DO NOT counter-trade
+    trend_override = False
+    if len(df) >= 10:
+        last10 = df.tail(10)
+        bullish_candles = sum(1 for _, r in last10.iterrows() if float(r["close"]) > float(r["open"]))
+        bearish_candles = 10 - bullish_candles
+        # Price movement over last 10 candles
+        price_10_ago = float(df.iloc[-10]["close"])
+        move_10 = close - price_10_ago
+        move_10_atr = abs(move_10) / atr if atr > 0 else 0
+
+        # Strong bullish momentum: 7+ green candles AND moved > 1.5 ATR up
+        if bullish_candles >= 7 and move_10 > atr * 1.5 and direction == "Sell":
+            trend_override = True
+            bonus -= 30
+            extra_warns.append(f"🚫 TREND OVERRIDE: {bullish_candles}/10 bullish candles + {move_10_atr:.1f}× ATR rally — DO NOT SELL")
+            gold_info["trend_override"] = "strong_bull_dont_sell"
+
+        # Strong bearish momentum: 7+ red candles AND moved > 1.5 ATR down
+        elif bearish_candles >= 7 and move_10 < -atr * 1.5 and direction == "Buy":
+            trend_override = True
+            bonus -= 30
+            extra_warns.append(f"🚫 TREND OVERRIDE: {bearish_candles}/10 bearish candles + {move_10_atr:.1f}× ATR drop — DO NOT BUY")
+            gold_info["trend_override"] = "strong_bear_dont_buy"
+
+        # Medium momentum: 6+ candles in one direction AND > 1.0 ATR move against trade
+        elif bullish_candles >= 6 and move_10 > atr * 1.0 and direction == "Sell":
+            bonus -= 15
+            extra_warns.append(f"⚠ Strong bullish momentum ({bullish_candles}/10 green) — SELL risky")
+            gold_info["trend_override"] = "bull_momentum_risky_sell"
+        elif bearish_candles >= 6 and move_10 < -atr * 1.0 and direction == "Buy":
+            bonus -= 15
+            extra_warns.append(f"⚠ Strong bearish momentum ({bearish_candles}/10 red) — BUY risky")
+            gold_info["trend_override"] = "bear_momentum_risky_buy"
+        else:
+            gold_info["trend_override"] = None
+
+        # Supply zone broken = zone invalidated, don't rely on it
+        if direction == "Sell" and move_10 > atr * 2.0:
+            # Price smashed through supply zones — zones are broken
+            bonus -= 10
+            extra_warns.append("🚫 Supply zones broken by strong rally — selling into strength")
+        elif direction == "Buy" and move_10 < -atr * 2.0:
+            bonus -= 10
+            extra_warns.append("🚫 Demand zones broken by strong selloff — buying into weakness")
+
+    # ═══ 13. CONTRADICTION SIGNAL AUTO-DOWNGRADE ═══
+    # Count how many warnings OPPOSE the current direction
+    contradiction_count = 0
+    oppose_keywords_sell = ["risky SELL", "OPPOSES direction", "DO NOT SELL",
+                            "Demand Zone", "Bullish CHoCH", "bullish_choch",
+                            "strong_bull", "bull_momentum"]
+    oppose_keywords_buy = ["risky BUY", "OPPOSES direction", "DO NOT BUY",
+                           "Supply Zone", "Bearish CHoCH", "bearish_choch",
+                           "strong_bear", "bear_momentum"]
+
+    oppose_kw = oppose_keywords_sell if direction == "Sell" else oppose_keywords_buy
+    for w in extra_warns:
+        for kw in oppose_kw:
+            if kw in w:
+                contradiction_count += 1
+                break
+
+    gold_info["contradictions"] = contradiction_count
+
+    # Hard downgrade: 2+ contradictions = force penalty
+    if contradiction_count >= 3:
+        bonus -= 25
+        extra_warns.append(f"🚫 CRITICAL: {contradiction_count} signals OPPOSE {direction} — AVOID THIS TRADE")
+    elif contradiction_count >= 2:
+        bonus -= 15
+        extra_warns.append(f"⚠ WARNING: {contradiction_count} signals oppose {direction} — high risk")
+
     # ══ SOFT GATE: bonus for high confirmations, mild penalty for low ══
     gold_info["confirmations"] = confirmations
-    if confirmations >= 4:
-        bonus += 10  # Extra reward for multi-confirmation setup
-        extra_warns.append(f"✅ Gold V3: {confirmations} confirmations — high conviction")
-    elif confirmations >= 2:
-        bonus += 3  # Decent setup
+    if confirmations >= 4 and contradiction_count == 0:
+        bonus += 10
+        extra_warns.append(f"✅ Gold V3: {confirmations} confirmations, 0 contradictions — high conviction")
+    elif confirmations >= 2 and contradiction_count == 0:
+        bonus += 3
     elif confirmations == 1:
-        bonus -= 5  # Mild penalty
+        bonus -= 5
         extra_warns.append(f"⚠ Gold V3: only {confirmations} confirmation — wait for more")
-    else:
-        bonus -= 12  # Penalty but not as harsh as V2's -20
+    elif confirmations == 0:
+        bonus -= 12
         extra_warns.append(f"🚫 Gold V3: no confirmations — signal weak")
 
     # Calculate adjusted score
@@ -2514,6 +2588,24 @@ def gold_engine_score(df, df_h4, direction, base_score, base_grade):
     elif adjusted_score >= 58: adjusted_grade = "B"
     elif adjusted_score >= 42: adjusted_grade = "C"
     else:                      adjusted_grade = "D"
+
+    # ══ FINAL SAFETY: Force downgrade if trend override or high contradictions ══
+    if trend_override:
+        adjusted_grade = "D"
+        adjusted_score = min(adjusted_score, 35)
+        gold_info["forced_downgrade"] = True
+        extra_warns.append("🛑 FORCED D — do not trade against this trend")
+    elif contradiction_count >= 3 and adjusted_grade in ("A+", "A", "B"):
+        adjusted_grade = "C"
+        adjusted_score = min(adjusted_score, 48)
+        gold_info["forced_downgrade"] = True
+        extra_warns.append("🛑 Downgraded to C — too many contradicting signals")
+    elif contradiction_count >= 2 and adjusted_grade in ("A+", "A"):
+        adjusted_grade = "B"
+        adjusted_score = min(adjusted_score, 60)
+        gold_info["forced_downgrade"] = True
+    else:
+        gold_info["forced_downgrade"] = False
 
     return adjusted_score, gold_info, adjusted_grade, extra_warns
 
