@@ -285,6 +285,12 @@ def _load_user_mt5_settings():
                 st.session_state["risk_pct"] = float(settings["risk_pct"])
     except Exception:
         pass
+    # Owner fallback: if no user_settings saved yet, load from env (Streamlit Secrets)
+    if _is_owner():
+        if _ENV_MA_TOKEN and not st.session_state.get("ma_token"):
+            st.session_state["ma_token"] = _ENV_MA_TOKEN
+        if _ENV_MA_ACCOUNT and not st.session_state.get("ma_account"):
+            st.session_state["ma_account"] = _ENV_MA_ACCOUNT
     st.session_state["_user_settings_loaded"] = True
 
 _load_user_mt5_settings()
