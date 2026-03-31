@@ -4063,7 +4063,7 @@ def render_sidebar():
 
         # ── Auto-refresh ──
         if st_autorefresh:
-            ref_int = st.selectbox("Auto-refresh (s)", [0,30,60,120],
+            ref_int = st.selectbox("Auto-refresh (s)", [0,15,30,60,120],
                                    format_func=lambda x:"Off" if x==0 else f"{x}s",
                                    index=0, key="ref_int")
             if ref_int > 0:
