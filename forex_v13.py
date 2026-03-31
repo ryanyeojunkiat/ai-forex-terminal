@@ -2814,7 +2814,8 @@ def page_overview():
                 f"{a['grade']} ({a['score']})</span>"
                 f"<span style='font-family:Space Mono,monospace;font-size:13px;font-weight:700;color:{dc};'>"
                 f"{'▲' if a['direction']=='Buy' else ('▼' if a['direction']=='Sell' else '◈')} {a['direction']}</span>"
-                f"<span style='font-size:10px;color:#8b9ab0;font-family:Space Mono,monospace;'>AI Ref: {grok_ai_r}/10</span>"
+                f"<span style='font-size:10px;color:{'#10b981' if ai_dir == a['direction'] else '#f59e0b'};font-family:Space Mono,monospace;'>"
+                f"{'AI ✅' if ai_dir == a['direction'] else 'AI ⚠'}</span>"
                 f"</div>"
                 # Technicals row
                 f"<div style='display:flex;gap:12px;font-size:11px;'>"
@@ -2896,10 +2897,13 @@ def page_symbol(symbol):
             f"<span style='font-size:10px;color:#4a5568;margin-left:8px;'>{price_src}</span></div>",
             unsafe_allow_html=True)
     with t3:
-        # AI rating display
+        # AI double-confirm status
         _g = a.get("grok")
-        _g_ai = _g.get("ai_rating", 0) if _g and not _g.get("error") else 0
-        st.markdown(f"<div style='font-family:Space Mono,monospace;font-size:10px;color:#4a5568;padding-top:8px;'>AI Ref: {_g_ai}/10</div>", unsafe_allow_html=True)
+        _g_dir = _g.get("direction", a["direction"]) if _g and not _g.get("error") else a["direction"]
+        _g_agrees = _g_dir == a["direction"]
+        _g_col = "#10b981" if _g_agrees else "#f59e0b"
+        _g_txt = "AI ✅" if _g_agrees else "AI ⚠"
+        st.markdown(f"<div style='font-family:Space Mono,monospace;font-size:11px;color:{_g_col};padding-top:8px;'>{_g_txt}</div>", unsafe_allow_html=True)
     with t4:
         mkt_c = "#10b981" if mkt=="LIVE" else "#f59e0b"
         st.markdown(f"<span style='font-family:Space Mono,monospace;font-size:11px;color:{mkt_c};'>{mkt}</span>",unsafe_allow_html=True)
