@@ -3221,26 +3221,30 @@ def page_overview():
 
             # ── SMART ENTRY data ──────────────────────────────────
             se = a.get("smart_entry", {})
-            # ── GROK PRIMARY display ──────────────────────────────
+            # ── UNIFIED SCORE: Calculator (60%) + AI (40%) ───────
             grok = a.get("grok")
             if grok and not grok.get("error"):
-                ai_r = grok.get("ai_rating", 0)
+                grok_ai_r = grok.get("ai_rating", 0)
                 ai_dir = grok.get("direction", a["direction"])
                 ai_action = grok.get("action", "WAIT")
                 ai_conf = grok.get("confidence", "LOW")
-                # AI Rating color
-                ai_col = "#10b981" if ai_r >= 7 else ("#f59e0b" if ai_r >= 5 else "#ef4444")
+                # Unified score: Calculator 60% + AI Rating (as /100) 40%
+                unified_score = int(a["score"] * 0.6 + (grok_ai_r * 10) * 0.4)
+                unified_score = max(0, min(100, unified_score))
+                # If AI and Calculator directions DISAGREE, heavy penalty
+                if ai_dir != a["direction"] and ai_dir != "Wait":
+                    unified_score = max(0, unified_score - 20)
+                # Unified grade
+                c_ = cfg(sym)
+                if   unified_score >= c_.get("grade_aplus", 88): uni_grade = "A+"
+                elif unified_score >= c_.get("grade_a", 76):    uni_grade = "A"
+                elif unified_score >= c_.get("grade_b", 62):    uni_grade = "B"
+                elif unified_score >= 45:                        uni_grade = "C"
+                else:                                            uni_grade = "D"
+                # Color based on unified grade
+                ai_col = "#10b981" if uni_grade in ("A+","A") else ("#f59e0b" if uni_grade == "B" else "#ef4444")
                 ai_dc  = "#10b981" if ai_dir=="Buy" else ("#ef4444" if ai_dir=="Sell" else "#8b9ab0")
-                # Confidence badge
                 conf_col = "#10b981" if ai_conf=="HIGH" else ("#f59e0b" if ai_conf=="MEDIUM" else "#4a5568")
-                # Agreement badge
-                agrees = grok.get("agrees_with_calculator", ai_dir == a["direction"])
-                agree_html = (f"<span style='font-size:9px;color:#10b981;background:rgba(16,185,129,0.1);"
-                              f"padding:1px 6px;border-radius:3px;border:1px solid rgba(16,185,129,0.3);'>"
-                              f"CALC AGREES</span>" if agrees else
-                              f"<span style='font-size:9px;color:#f59e0b;background:rgba(245,158,11,0.1);"
-                              f"padding:1px 6px;border-radius:3px;border:1px solid rgba(245,158,11,0.3);'>"
-                              f"CALC DIFFERS ({a['direction']} {a['score']}/100)</span>")
                 # News impact
                 news_html = ""
                 news_imp = grok.get("news_impact","")
@@ -3252,14 +3256,15 @@ def page_overview():
                 if risk_warn and risk_warn.lower() != "none":
                     risk_html = f"<div style='font-size:10px;color:#f59e0b;margin-top:3px;font-family:Space Mono,monospace;'>⚠ {risk_warn}</div>"
             else:
-                # Fallback: no Grok data, use calculator
-                ai_r = round(a["score"]/10)
+                # Fallback: no Grok data, use calculator only
+                grok_ai_r = 0
+                unified_score = a["score"]
+                uni_grade = a["grade"]
                 ai_dir = a["direction"]
                 ai_action = a["direction"]
                 ai_col = gc
                 ai_dc = dc
                 conf_col = "#4a5568"
-                agree_html = ""
                 news_html = ""
                 risk_html = ""
 
@@ -3274,19 +3279,19 @@ def page_overview():
                 # Price
                 f"<div style='font-family:Space Mono,monospace;font-size:20px;font-weight:700;color:#e8edf2;margin-bottom:8px;'>{fmt_price(price,sym)}"
                 f"<span style='font-size:10px;color:#4a5568;margin-left:4px;'>{price_src}</span></div>"
-                # AI Rating (PRIMARY) + Direction
+                # UNIFIED Score + Grade + Direction
                 f"<div style='display:flex;gap:8px;align-items:center;margin-bottom:6px;'>"
                 f"<span style='font-family:Space Mono,monospace;font-size:22px;font-weight:900;color:{ai_col};"
                 f"background:rgba(255,255,255,0.04);padding:2px 12px;border-radius:6px;border:2px solid {ai_col};'>"
-                f"AI {ai_r}/10</span>"
+                f"{uni_grade} ({unified_score})</span>"
                 f"<span style='font-family:Space Mono,monospace;font-size:13px;font-weight:700;color:{ai_dc};'>"
                 f"{'▲' if ai_dir=='Buy' else ('▼' if ai_dir=='Sell' else '◈')} {ai_action}</span>"
                 f"<span style='font-size:10px;color:{conf_col};font-family:Space Mono,monospace;'>{grok.get('confidence','') if grok and not grok.get('error') else ''}</span>"
                 f"</div>"
-                # Calculator backup + Agreement badge
+                # Sub-scores: Calc + AI breakdown
                 f"<div style='display:flex;gap:8px;align-items:center;margin-bottom:6px;'>"
                 f"<span style='font-size:10px;color:#4a5568;font-family:Space Mono,monospace;'>"
-                f"Calc: {a['grade']} {a['score']}/100 {a['direction']}</span> {agree_html}</div>"
+                f"Calc: {a['grade']} {a['score']}/100 | AI: {grok_ai_r}/10</span></div>"
                 # Technicals row
                 f"<div style='display:flex;gap:12px;font-size:11px;'>"
                 f"<span style='color:#8b9ab0;'>H4: <span style='color:#e8edf2;'>{a['h4_trend']}</span></span>"
@@ -3378,20 +3383,30 @@ def page_symbol(symbol):
         mkt_c = "#10b981" if mkt=="LIVE" else "#f59e0b"
         st.markdown(f"<span style='font-family:Space Mono,monospace;font-size:11px;color:{mkt_c};'>{mkt}</span>",unsafe_allow_html=True)
 
-    # ── GROK AI PRIMARY PANEL ────────────────────────────────
+    # ── UNIFIED AI ANALYSIS PANEL ─────────────────────────────
     grok = a.get("grok")
     if grok and not grok.get("error"):
-        ai_r = grok.get("ai_rating", 0)
+        grok_ai_r = grok.get("ai_rating", 0)
         ai_dir = grok.get("direction", a["direction"])
         ai_action = grok.get("action", "WAIT")
         ai_conf = grok.get("confidence", "LOW")
-        ai_col = "#10b981" if ai_r >= 7 else ("#f59e0b" if ai_r >= 5 else "#ef4444")
+        # UNIFIED SCORE: Calculator 60% + AI 40%
+        detail_unified = int(a["score"] * 0.6 + (grok_ai_r * 10) * 0.4)
+        detail_unified = max(0, min(100, detail_unified))
+        if ai_dir != a["direction"] and ai_dir != "Wait":
+            detail_unified = max(0, detail_unified - 20)
+        c_det = cfg(symbol)
+        if   detail_unified >= c_det.get("grade_aplus", 88): det_grade = "A+"
+        elif detail_unified >= c_det.get("grade_a", 76):    det_grade = "A"
+        elif detail_unified >= c_det.get("grade_b", 62):    det_grade = "B"
+        elif detail_unified >= 45:                            det_grade = "C"
+        else:                                                 det_grade = "D"
+        ai_col = "#10b981" if det_grade in ("A+","A") else ("#f59e0b" if det_grade == "B" else "#ef4444")
         ai_dc  = "#10b981" if ai_dir=="Buy" else ("#ef4444" if ai_dir=="Sell" else "#8b9ab0")
         conf_col = "#10b981" if ai_conf=="HIGH" else ("#f59e0b" if ai_conf=="MEDIUM" else "#4a5568")
         border_col = ai_col
         agrees = grok.get("agrees_with_calculator", ai_dir == a["direction"])
 
-        # Main AI panel
         reasoning = grok.get("reasoning", "")
         key_factors = grok.get("key_factors", [])
         news_imp = grok.get("news_impact", "")
@@ -3403,18 +3418,19 @@ def page_symbol(symbol):
             f"<div style='background:linear-gradient(135deg,rgba(13,17,23,0.95),rgba(0,212,170,0.03));"
             f"border:2px solid {border_col};border-radius:12px;padding:16px 20px;margin:12px 0;'>"
             f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;'>"
-            f"<span style='font-family:Space Mono,monospace;font-size:11px;color:#00d4aa;letter-spacing:.15em;'>◈ GROK AI PRIMARY ANALYSIS</span>"
+            f"<span style='font-family:Space Mono,monospace;font-size:11px;color:#00d4aa;letter-spacing:.15em;'>◈ AI ANALYSIS</span>"
             f"<span style='font-size:10px;color:{conf_col};font-family:Space Mono,monospace;"
             f"background:rgba(255,255,255,0.04);padding:2px 8px;border-radius:3px;'>{ai_conf} CONFIDENCE</span></div>"
-            # AI Rating big
+            # UNIFIED Score big
             f"<div style='display:flex;gap:16px;align-items:center;margin-bottom:12px;'>"
             f"<span style='font-family:Space Mono,monospace;font-size:36px;font-weight:900;color:{ai_col};'>"
-            f"{ai_r}<span style='font-size:16px;color:#4a5568;'>/10</span></span>"
+            f"{det_grade}<span style='font-size:18px;color:#4a5568;'> ({detail_unified})</span></span>"
             f"<div>"
             f"<div style='font-family:Space Mono,monospace;font-size:16px;font-weight:700;color:{ai_dc};'>"
             f"{'▲' if ai_dir=='Buy' else ('▼' if ai_dir=='Sell' else '◈')} {ai_action}</div>"
-            f"<div style='font-size:11px;color:#4a5568;margin-top:2px;'>Calculator: {a['grade']} {a['score']}/100 "
-            f"{'✅ Agrees' if agrees else '⚠ Differs ('+a['direction']+')'}</div></div></div>"
+            f"<div style='font-size:11px;color:#4a5568;margin-top:2px;'>"
+            f"Calc: {a['score']}/100 ({a['grade']}) | AI: {grok_ai_r}/10 "
+            f"{'✅' if agrees else '⚠'}</div></div></div>"
             # Reasoning
             f"<div style='font-size:12px;color:#e8edf2;margin-bottom:10px;line-height:1.5;'>{reasoning}</div>"
             # Key factors
@@ -3591,10 +3607,14 @@ def page_symbol(symbol):
         with st.expander("📊 Calculator Breakdown (Backup)", expanded=False):
             render_score_breakdown(a["bd"], a["score"], a["grade"])
 
-        # ── Signal alert: Grok AI Rating 8+ OR Grade A/A+ ──────
+        # ── Signal alert: Unified score Grade A/A+ ──────────────
         grok_rating = grok.get("ai_rating", 0) if grok and not grok.get("error") else 0
-        grok_triggered = grok_rating >= 8
+        _uni_s = int(a["score"] * 0.6 + (grok_rating * 10) * 0.4)
+        _uni_s = max(0, min(100, _uni_s))
+        _c_alert = cfg(symbol)
+        _uni_triggered = _uni_s >= _c_alert.get("grade_a", 76)
         calc_triggered = a["grade"] in ("A+", "A")
+        grok_triggered = _uni_triggered  # Use unified instead of raw AI rating
         alert_key    = f"_alerted_{symbol}_{a['grade']}_{a['direction']}_{a['score']}_{grok_rating}"
         ai_vfy_key   = f"_ai_vfy_{symbol}_{a['grade']}_{a['direction']}_{a['score']}"
         if (grok_triggered or calc_triggered) and not st.session_state.get(alert_key):
