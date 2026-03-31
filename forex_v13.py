@@ -2899,7 +2899,7 @@ def page_symbol(symbol):
         # AI rating display
         _g = a.get("grok")
         _g_ai = _g.get("ai_rating", 0) if _g and not _g.get("error") else 0
-        st.markdown(f"<div style='font-family:Space Mono,monospace;font-size:14px;padding-top:6px;'>AI {_g_ai}/10</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-family:Space Mono,monospace;font-size:10px;color:#4a5568;padding-top:8px;'>AI Ref: {_g_ai}/10</div>", unsafe_allow_html=True)
     with t4:
         mkt_c = "#10b981" if mkt=="LIVE" else "#f59e0b"
         st.markdown(f"<span style='font-family:Space Mono,monospace;font-size:11px;color:{mkt_c};'>{mkt}</span>",unsafe_allow_html=True)
@@ -2924,27 +2924,20 @@ def page_symbol(symbol):
         factors_html = "".join(f"<span style='font-size:10px;color:#a78bfa;background:rgba(167,139,250,0.1);"
                                f"padding:2px 8px;border-radius:3px;margin-right:6px;'>{f}</span>" for f in key_factors[:4])
 
+        # AI as secondary reference — no big rating, no direction, just text insight
+        _agree_icon = "✅ Agrees" if agrees else "⚠ Disagrees"
+        _agree_col = "#10b981" if agrees else "#f59e0b"
         st.markdown(
-            f"<div style='background:linear-gradient(135deg,rgba(13,17,23,0.95),rgba(0,212,170,0.03));"
-            f"border:2px solid {border_col};border-radius:12px;padding:16px 20px;margin:12px 0;'>"
-            f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;'>"
-            f"<span style='font-family:Space Mono,monospace;font-size:11px;color:#00d4aa;letter-spacing:.15em;'>◈ AI ANALYSIS</span>"
-            f"<span style='font-size:10px;color:{conf_col};font-family:Space Mono,monospace;"
-            f"background:rgba(255,255,255,0.04);padding:2px 8px;border-radius:3px;'>{ai_conf} CONFIDENCE</span></div>"
-            # AI Rating
-            f"<div style='display:flex;gap:16px;align-items:center;margin-bottom:12px;'>"
-            f"<span style='font-family:Space Mono,monospace;font-size:36px;font-weight:900;color:{ai_col};'>"
-            f"{grok_ai_r}/10</span>"
-            f"<div>"
-            f"<div style='font-family:Space Mono,monospace;font-size:16px;font-weight:700;color:{ai_dc};'>"
-            f"{'▲' if ai_dir=='Buy' else ('▼' if ai_dir=='Sell' else '◈')} {ai_action}</div>"
-            f"<div style='font-size:11px;color:#4a5568;margin-top:2px;'>"
-            f"Calc: {a['score']}/100 ({a['grade']}) "
-            f"{'✅' if agrees else '⚠'}</div></div></div>"
-            # Reasoning
-            f"<div style='font-size:12px;color:#e8edf2;margin-bottom:10px;line-height:1.5;'>{reasoning}</div>"
+            f"<div style='background:rgba(13,17,23,0.8);border:1px solid rgba(255,255,255,0.08);"
+            f"border-radius:8px;padding:12px 16px;margin:12px 0;'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;'>"
+            f"<span style='font-family:Space Mono,monospace;font-size:10px;color:#8b9ab0;letter-spacing:.1em;'>AI REFERENCE (Grok)</span>"
+            f"<span style='font-size:10px;color:{_agree_col};font-family:Space Mono,monospace;'>"
+            f"{_agree_icon} with Calculator | Ref: {grok_ai_r}/10</span></div>"
+            # Reasoning text only
+            f"<div style='font-size:12px;color:#c9d1d9;margin-bottom:8px;line-height:1.5;'>{reasoning}</div>"
             # Key factors
-            f"<div style='margin-bottom:8px;'>{factors_html}</div>"
+            f"<div style='margin-bottom:6px;'>{factors_html}</div>"
             # News + Risk
             + (f"<div style='font-size:11px;color:#a78bfa;margin-bottom:4px;'>📰 {news_imp}</div>" if news_imp else "")
             + (f"<div style='font-size:11px;color:#f59e0b;'>⚠ {risk_warn}</div>" if risk_warn and risk_warn.lower() != "none" else "")
@@ -2983,34 +2976,72 @@ def page_symbol(symbol):
         ar = gi.get("asian_range", {})
         bo = gi.get("breakout", "no_data")
         sw = gi.get("sweep", {})
-        sq = gi.get("session_quality", "off")
         bonus = gi.get("bonus", 0)
+        confirmations = gi.get("confirmations", 0)
+        contradictions = gi.get("contradictions", 0)
+
+        # MTF display
+        h4t_g = gi.get("h4_trend", "neutral")
+        h1t_g = gi.get("h1_trend", "neutral")
+        et_g  = gi.get("entry_trend", "neutral")
+        mtf_align = gi.get("mtf_alignment", "unknown")
+        def _tf_col(t): return "#10b981" if "bull" in str(t) else ("#ef4444" if "bear" in str(t) else "#f59e0b")
+        def _tf_icon(t): return "▲" if "bull" in str(t) else ("▼" if "bear" in str(t) else "◈")
+        mtf_col = {"perfect": "#10b981", "good": "#84cc16", "weak": "#f59e0b", "opposed": "#ef4444"}.get(mtf_align, "#8b9ab0")
+
+        # Zone display
+        zone_info = gi.get("zones", {})
+        zone_pos = zone_info.get("position", None)
+        zone_text = {"supply": "🔴 In Supply Zone", "demand": "🟢 In Demand Zone"}.get(zone_pos, "— No zone")
+        zone_col = "#ef4444" if zone_pos == "supply" else ("#10b981" if zone_pos == "demand" else "#8b9ab0")
+
+        # FVG, CHoCH, Killzone, RSI Div
+        fvg = gi.get("fvg", {})
+        choch = gi.get("choch", {})
+        kz = gi.get("killzone", "Off-hours")
+        rsi_div = gi.get("rsi_divergence", {})
 
         bo_col = "#10b981" if gi.get("breakout_aligned") else ("#f59e0b" if bo == "inside" else "#8b9ab0")
-        bo_text = {"bull_breakout": "▲ BULL Breakout", "bear_breakout": "▼ BEAR Breakout",
-                   "inside": "◈ Inside Range", "invalid": "— No Data", "no_data": "— No Data"}.get(bo, bo)
+        bo_text = {"bull_breakout": "▲ BULL", "bear_breakout": "▼ BEAR",
+                   "inside": "◈ Inside", "invalid": "—", "no_data": "—"}.get(bo, bo)
         _sw_lvl = f"{sw.get('sweep_level', 0):.2f}"
-        sw_text = f"🏦 {sw['direction'].upper()} sweep @ {_sw_lvl}" if sw.get("detected") else "— None detected"
-        sq_col = "#10b981" if sq == "prime" else ("#84cc16" if sq == "good" else ("#f59e0b" if sq == "range" else "#8b9ab0"))
-        sq_text = {"prime": "★ PRIME (Overlap)", "good": "● Good", "range": "◐ Range (Asian)", "off": "○ Off-peak"}.get(sq, sq)
+        sw_text = f"🏦 {sw['direction'].upper()} @ {_sw_lvl}" if sw.get("detected") else "—"
         b_col = "#10b981" if bonus > 0 else ("#ef4444" if bonus < 0 else "#8b9ab0")
+        conf_col = "#10b981" if confirmations >= 4 else ("#84cc16" if confirmations >= 2 else "#f59e0b")
+        contra_col = "#ef4444" if contradictions >= 2 else ("#f59e0b" if contradictions >= 1 else "#10b981")
 
         st.markdown(
             f"<div style='background:rgba(255,215,0,0.04);border:1px solid rgba(255,215,0,0.15);"
             f"border-radius:8px;padding:12px 14px;margin:8px 0;'>"
-            f"<div style='font-size:10px;color:#ffd700;font-family:Space Mono,monospace;"
-            f"letter-spacing:.1em;margin-bottom:8px;'>🥇 GOLD ENGINE</div>"
-            f"<div style='display:flex;gap:12px;font-size:11px;flex-wrap:wrap;'>"
-            f"<div><span style='color:#8b9ab0;'>Asian Range: </span>"
-            f"<span style='color:#e8edf2;'>{(str(round(ar['low'],2)) + ' — ' + str(round(ar['high'],2))) if ar.get('valid') else 'N/A'}</span></div>"
-            f"<div><span style='color:#8b9ab0;'>Breakout: </span>"
-            f"<span style='color:{bo_col};font-weight:700;'>{bo_text}</span></div>"
-            f"<div><span style='color:#8b9ab0;'>Sweep: </span>"
-            f"<span style='color:#e8edf2;'>{sw_text}</span></div>"
-            f"<div><span style='color:#8b9ab0;'>Session: </span>"
-            f"<span style='color:{sq_col};'>{sq_text}</span></div>"
-            f"<div><span style='color:#8b9ab0;'>Score Adj: </span>"
-            f"<span style='color:{b_col};font-weight:700;'>{bonus:+d} pts</span></div>"
+            # Title + Score
+            f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;'>"
+            f"<span style='font-size:10px;color:#ffd700;font-family:Space Mono,monospace;"
+            f"letter-spacing:.1em;'>🥇 GOLD ENGINE V2</span>"
+            f"<span style='font-size:12px;font-weight:700;color:{b_col};font-family:Space Mono,monospace;'>"
+            f"{bonus:+d} pts | ✅{confirmations} ❌{contradictions}</span></div>"
+            # Row 1: Multi-Timeframe
+            f"<div style='background:rgba(255,255,255,0.03);border-radius:6px;padding:8px 10px;margin-bottom:8px;'>"
+            f"<div style='font-size:9px;color:#8b9ab0;font-family:Space Mono,monospace;letter-spacing:.08em;margin-bottom:6px;'>MULTI-TIMEFRAME ANALYSIS</div>"
+            f"<div style='display:flex;gap:12px;font-size:11px;'>"
+            f"<div><span style='color:#8b9ab0;'>H4: </span><span style='color:{_tf_col(h4t_g)};font-weight:700;'>{_tf_icon(h4t_g)} {h4t_g.upper()}</span></div>"
+            f"<div><span style='color:#8b9ab0;'>H1: </span><span style='color:{_tf_col(h1t_g)};font-weight:700;'>{_tf_icon(h1t_g)} {h1t_g.upper()}</span></div>"
+            f"<div><span style='color:#8b9ab0;'>Entry: </span><span style='color:{_tf_col(et_g)};font-weight:700;'>{_tf_icon(et_g)} {et_g.upper()}</span></div>"
+            f"<div><span style='color:#8b9ab0;'>Align: </span><span style='color:{mtf_col};font-weight:700;'>{mtf_align.upper()}</span></div>"
+            f"</div></div>"
+            # Row 2: Smart Money Modules
+            f"<div style='display:flex;gap:10px;font-size:11px;flex-wrap:wrap;margin-bottom:6px;'>"
+            f"<div><span style='color:#8b9ab0;'>Zone: </span><span style='color:{zone_col};'>{zone_text}</span></div>"
+            f"<div><span style='color:#8b9ab0;'>FVG: </span><span style='color:{'#10b981' if fvg.get('detected') else '#8b9ab0'};'>{'✓ ' + str(fvg.get('type','')) if fvg.get('detected') else '—'}</span></div>"
+            f"<div><span style='color:#8b9ab0;'>CHoCH: </span><span style='color:{'#10b981' if choch.get('detected') else '#8b9ab0'};'>{'✓ ' + str(choch.get('direction','')) if choch.get('detected') else '—'}</span></div>"
+            f"<div><span style='color:#8b9ab0;'>Divergence: </span><span style='color:{'#10b981' if rsi_div.get('detected') else '#8b9ab0'};'>{'✓ ' + str(rsi_div.get('type','')) if rsi_div.get('detected') else '—'}</span></div>"
+            f"</div>"
+            # Row 3: Traditional modules
+            f"<div style='display:flex;gap:10px;font-size:11px;flex-wrap:wrap;'>"
+            f"<div><span style='color:#8b9ab0;'>Killzone: </span><span style='color:#e8edf2;'>{kz}</span></div>"
+            f"<div><span style='color:#8b9ab0;'>Asian: </span>"
+            f"<span style='color:#e8edf2;'>{(str(round(ar['low'],2)) + '—' + str(round(ar['high'],2))) if ar.get('valid') else 'N/A'}</span>"
+            f" <span style='color:{bo_col};font-weight:700;'>{bo_text}</span></div>"
+            f"<div><span style='color:#8b9ab0;'>Sweep: </span><span style='color:#e8edf2;'>{sw_text}</span></div>"
             f"</div></div>",
             unsafe_allow_html=True)
 
