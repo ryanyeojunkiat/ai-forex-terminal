@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Alpha Edge AI — AI-Powered Forex & Gold Trading Terminal</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--primary:#00d4aa;--accent:#6366f1;--bg:#0a0e17;--bg2:#111827;--bg3:#1a1f2e;--text:#e8edf2;--text2:#8b9ab0;--red:#ef4444;--green:#10b981;--gold:#f59e0b}
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);line-height:1.6;overflow-x:hidden}
+a{color:var(--primary);text-decoration:none}
+.container{max-width:1200px;margin:0 auto;padding:0 24px}
+
+/* NAV */
+nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(10,14,23,0.92);backdrop-filter:blur(20px);border-bottom:1px solid rgba(255,255,255,0.06);padding:16px 0}
+nav .container{display:flex;align-items:center;justify-content:space-between}
+.logo{font-size:1.3rem;font-weight:800;color:var(--primary);letter-spacing:-0.5px}
+.logo span{color:var(--text)}
+.nav-links{display:flex;gap:32px;align-items:center}
+.nav-links a{color:var(--text2);font-size:0.9rem;transition:color 0.2s}
+.nav-links a:hover{color:var(--primary)}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:10px 24px;border-radius:8px;font-weight:600;font-size:0.9rem;transition:all 0.3s;cursor:pointer;border:none}
+.btn-primary{background:var(--primary);color:var(--bg);box-shadow:0 4px 20px rgba(0,212,170,0.3)}
+.btn-primary:hover{transform:translateY(-2px);box-shadow:0 8px 30px rgba(0,212,170,0.4)}
+.btn-outline{background:transparent;color:var(--primary);border:1.5px solid var(--primary)}
+.btn-outline:hover{background:rgba(0,212,170,0.1)}
+.btn-accent{background:var(--accent);color:#fff;box-shadow:0 4px 20px rgba(99,102,241,0.3)}
+
+/* HERO */
+.hero{padding:160px 0 100px;text-align:center;position:relative;overflow:hidden}
+.hero::before{content:'';position:absolute;top:-200px;left:50%;transform:translateX(-50%);width:800px;height:800px;background:radial-gradient(circle,rgba(0,212,170,0.08) 0%,transparent 70%);pointer-events:none}
+.hero-badge{display:inline-flex;align-items:center;gap:8px;padding:6px 16px;background:rgba(0,212,170,0.1);border:1px solid rgba(0,212,170,0.2);border-radius:50px;font-size:0.85rem;color:var(--primary);margin-bottom:24px}
+.hero-badge .dot{width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+.hero h1{font-size:clamp(2.5rem,5vw,4rem);font-weight:800;line-height:1.1;margin-bottom:20px;letter-spacing:-1.5px}
+.hero h1 .grad{background:linear-gradient(135deg,var(--primary),var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.hero p{font-size:1.15rem;color:var(--text2);max-width:640px;margin:0 auto 40px;line-height:1.7}
+.hero-btns{display:flex;gap:16px;justify-content:center;flex-wrap:wrap}
+.hero-stats{display:flex;gap:48px;justify-content:center;margin-top:60px;flex-wrap:wrap}
+.hero-stat{text-align:center}
+.hero-stat .num{font-size:2rem;font-weight:800;color:var(--primary)}
+.hero-stat .label{font-size:0.85rem;color:var(--text2);margin-top:4px}
+
+/* FEATURES */
+.section{padding:100px 0}
+.section-title{text-align:center;margin-bottom:60px}
+.section-title .tag{display:inline-block;padding:4px 14px;background:rgba(99,102,241,0.15);color:var(--accent);border-radius:4px;font-size:0.8rem;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:16px}
+.section-title h2{font-size:clamp(1.8rem,3.5vw,2.6rem);font-weight:800;letter-spacing:-1px;margin-bottom:12px}
+.section-title p{color:var(--text2);max-width:560px;margin:0 auto;font-size:1rem}
+.features-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:24px}
+.feature-card{background:var(--bg2);border:1px solid rgba(255,255,255,0.06);border-radius:16px;padding:32px;transition:all 0.3s}
+.feature-card:hover{border-color:rgba(0,212,170,0.3);transform:translateY(-4px);box-shadow:0 12px 40px rgba(0,0,0,0.3)}
+.feature-icon{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.5rem;margin-bottom:20px}
+.feature-card h3{font-size:1.15rem;font-weight:700;margin-bottom:10px}
+.feature-card p{color:var(--text2);font-size:0.95rem;line-height:1.6}
+
+/* HOW IT WORKS */
+.steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:32px;position:relative}
+.step{text-align:center;padding:24px}
+.step-num{width:56px;height:56px;border-radius:50%;background:linear-gradient(135deg,var(--primary),var(--accent));color:#fff;font-size:1.4rem;font-weight:800;display:flex;align-items:center;justify-content:center;margin:0 auto 20px;box-shadow:0 4px 20px rgba(0,212,170,0.3)}
+.step h3{font-size:1.05rem;margin-bottom:8px}
+.step p{color:var(--text2);font-size:0.9rem}
+
+/* PRICING */
+.pricing-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:24px;max-width:900px;margin:0 auto}
+.price-card{background:var(--bg2);border:1px solid rgba(255,255,255,0.06);border-radius:16px;padding:36px;position:relative;overflow:hidden}
+.price-card.featured{border-color:var(--primary);box-shadow:0 0 40px rgba(0,212,170,0.15)}
+.price-card.featured::before{content:'MOST POPULAR';position:absolute;top:16px;right:-32px;background:var(--primary);color:var(--bg);font-size:0.7rem;font-weight:700;padding:4px 40px;transform:rotate(45deg)}
+.price-card .plan{font-size:0.85rem;color:var(--primary);font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
+.price-card .price{font-size:2.8rem;font-weight:800;margin-bottom:4px}
+.price-card .price span{font-size:1rem;color:var(--text2);font-weight:400}
+.price-card .desc{color:var(--text2);font-size:0.9rem;margin-bottom:24px}
+.price-card ul{list-style:none;margin-bottom:28px}
+.price-card li{padding:8px 0;color:var(--text2);font-size:0.9rem;display:flex;align-items:center;gap:10px}
+.price-card li::before{content:'✓';color:var(--green);font-weight:700}
+.price-card .btn{width:100%;justify-content:center}
+
+/* GOLD */
+.gold-section{background:linear-gradient(180deg,rgba(245,158,11,0.05) 0%,transparent 100%)}
+.gold-grid{display:grid;grid-template-columns:1fr 1fr;gap:48px;align-items:center}
+.gold-content h2{font-size:2rem;font-weight:800;margin-bottom:16px;letter-spacing:-0.5px}
+.gold-content h2 span{color:var(--gold)}
+.gold-content p{color:var(--text2);margin-bottom:24px;line-height:1.7}
+.gold-features{display:flex;flex-direction:column;gap:16px}
+.gold-feat{display:flex;gap:12px;align-items:flex-start}
+.gold-feat .icon{width:36px;height:36px;border-radius:8px;background:rgba(245,158,11,0.15);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:1rem}
+.gold-feat h4{font-size:0.95rem;font-weight:600;margin-bottom:2px}
+.gold-feat p{font-size:0.85rem;color:var(--text2)}
+.gold-visual{background:var(--bg3);border-radius:16px;padding:32px;border:1px solid rgba(245,158,11,0.15)}
+.gold-visual .stat-row{display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px solid rgba(255,255,255,0.06)}
+.gold-visual .stat-row:last-child{border:none}
+.gold-visual .stat-label{color:var(--text2);font-size:0.9rem}
+.gold-visual .stat-value{font-weight:700;color:var(--gold)}
+
+/* TESTIMONIALS / TRUST */
+.trust-grid{display:flex;gap:24px;justify-content:center;flex-wrap:wrap}
+.trust-card{background:var(--bg2);border-radius:12px;padding:24px 28px;border:1px solid rgba(255,255,255,0.06);max-width:320px;text-align:center}
+.trust-card .emoji{font-size:2rem;margin-bottom:12px}
+.trust-card p{color:var(--text2);font-size:0.9rem;font-style:italic;margin-bottom:12px}
+.trust-card .name{font-weight:700;font-size:0.9rem}
+
+/* CTA */
+.cta{text-align:center;padding:100px 0;background:linear-gradient(180deg,transparent,rgba(0,212,170,0.05))}
+.cta h2{font-size:clamp(1.8rem,3vw,2.4rem);font-weight:800;margin-bottom:16px}
+.cta p{color:var(--text2);max-width:500px;margin:0 auto 32px;font-size:1.05rem}
+
+/* FOOTER */
+footer{padding:40px 0;border-top:1px solid rgba(255,255,255,0.06);text-align:center;color:var(--text2);font-size:0.85rem}
+
+/* RESPONSIVE */
+@media(max-width:768px){
+  .nav-links a:not(.btn){display:none}
+  .hero h1{font-size:2.2rem}
+  .hero-stats{gap:24px}
+  .gold-grid{grid-template-columns:1fr}
+  .features-grid{grid-template-columns:1fr}
+  .pricing-cards{grid-template-columns:1fr}
+}
+</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+<div class="container">
+  <div class="logo">Alpha<span>Edge</span> <span style="color:var(--primary)">AI</span></div>
+  <div class="nav-links">
+    <a href="#features">Features</a>
+    <a href="#gold">Gold Engine</a>
+    <a href="#pricing">Pricing</a>
+    <a href="#how">How It Works</a>
+    <a href="https://ai-forex-terminal-zjuv4wwt68n27roweqei35.streamlit.app" class="btn btn-primary" target="_blank">Launch Terminal</a>
+  </div>
+</div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+<div class="container">
+  <div class="hero-badge"><span class="dot"></span> AI-Powered Trading Terminal — Live Now</div>
+  <h1>Don't Just Trade.<br><span class="grad">Trade with an Edge.</span></h1>
+  <p style="font-size:1.3rem;color:#00d4aa;font-weight:600;margin-bottom:12px;font-style:italic;">"Let AI Read the Market. You Make the Call."</p>
+  <p>Alpha Edge AI combines Grok AI primary analysis, H4 trend scoring, Gold Engine V2, and real-time MT5 data to give you institutional-grade trading signals — so you trade with confidence, not guesswork.</p>
+  <div class="hero-btns">
+    <a href="https://ai-forex-terminal-zjuv4wwt68n27roweqei35.streamlit.app" class="btn btn-primary" target="_blank">Start Free Trial</a>
+    <a href="#features" class="btn btn-outline">See Features</a>
+  </div>
+  <div class="hero-stats">
+    <div class="hero-stat"><div class="num">AI 10</div><div class="label">Grok AI Rating</div></div>
+    <div class="hero-stat"><div class="num">10+</div><div class="label">Forex & Gold Pairs</div></div>
+    <div class="hero-stat"><div class="num">2-Layer</div><div class="label">AI + Calculator</div></div>
+    <div class="hero-stat"><div class="num">24/5</div><div class="label">Market Coverage</div></div>
+  </div>
+</div>
+</section>
+
+<!-- FEATURES -->
+<section class="section" id="features">
+<div class="container">
+  <div class="section-title">
+    <div class="tag">Features</div>
+    <h2>Everything You Need to Trade with an Edge</h2>
+    <p>Professional-grade tools wrapped in an intelligent system that learns and adapts.</p>
+  </div>
+  <div class="features-grid">
+    <div class="feature-card">
+      <div class="feature-icon" style="background:rgba(0,212,170,0.1)">📊</div>
+      <h3>H4-First 100-Point Signal Engine</h3>
+      <p>Every signal is scored across 7 dimensions — H4 trend, EMA stack, pullback, MACD, RSI, candle patterns, and session timing. Only Grade B+ signals make the cut.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon" style="background:rgba(99,102,241,0.1)">🤖</div>
+      <h3>Grok AI Verification</h3>
+      <p>High-grade signals are verified by xAI's Grok AI for an extra layer of confidence. AI analyzes market context, news events, and technical confluence.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon" style="background:rgba(245,158,11,0.1)">🥇</div>
+      <h3>Gold Engine V2</h3>
+      <p>Specialized XAUUSD engine with 5 institutional filters: Asian Range Breakout, Liquidity Sweep, Momentum, Structure, and Candle Quality. HARD GATE requires 2+ confirmations.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon" style="background:rgba(14,165,233,0.1)">📡</div>
+      <h3>Live MT5 Connection</h3>
+      <p>Connect your MetaTrader 5 account via MetaApi for real-time bid/ask prices, position tracking, and automatic trade journal syncing.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon" style="background:rgba(239,68,68,0.1)">🛡️</div>
+      <h3>Smart Risk Management</h3>
+      <p>ATR-based SL/TP, 3-stage trailing stops (SL → BE → Trail), spike protection, overextension filters, and loss streak safeguards built right in.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon" style="background:rgba(16,185,129,0.1)">🔬</div>
+      <h3>Backtest Engine</h3>
+      <p>Test strategies against historical data with H4-synced backtesting. Gold Engine V2 filters apply automatically. See win rate, R-multiples, and equity curves.</p>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- GOLD SECTION -->
+<section class="section gold-section" id="gold">
+<div class="container">
+  <div class="gold-grid">
+    <div class="gold-content">
+      <div class="section-title" style="text-align:left;margin-bottom:32px">
+        <div class="tag" style="background:rgba(245,158,11,0.15);color:var(--gold)">Gold Specialist</div>
+      </div>
+      <h2><span>XAUUSD</span> — Built for Gold Traders</h2>
+      <p>Gold moves differently. That's why we built a dedicated engine with fast EMA9/21 direction detection and 5 institutional-grade filters specifically tuned for gold's volatility.</p>
+      <div class="gold-features">
+        <div class="gold-feat">
+          <div class="icon">⚡</div>
+          <div><h4>Fast EMA9/21 System</h4><p>7-signal scoring needs 5/7 for direction — faster than traditional EMA20/50/200</p></div>
+        </div>
+        <div class="gold-feat">
+          <div class="icon">🔒</div>
+          <div><h4>HARD GATE System</h4><p>Requires 2+ confirmations from 5 filters. 0-1 confirmations = automatic -20 penalty</p></div>
+        </div>
+        <div class="gold-feat">
+          <div class="icon">🎯</div>
+          <div><h4>Scalping Optimized</h4><p>Tight SL (1.0x ATR), close TP1 (1.2x ATR), 15-bar cooldown between trades</p></div>
+        </div>
+      </div>
+    </div>
+    <div class="gold-visual">
+      <h3 style="margin-bottom:20px;color:var(--gold)">Gold Engine V2 Parameters</h3>
+      <div class="stat-row"><span class="stat-label">Stop Loss</span><span class="stat-value">1.0x ATR</span></div>
+      <div class="stat-row"><span class="stat-label">Take Profit 1</span><span class="stat-value">1.2x ATR</span></div>
+      <div class="stat-row"><span class="stat-label">Take Profit 2</span><span class="stat-value">2.0x ATR</span></div>
+      <div class="stat-row"><span class="stat-label">Min Risk:Reward</span><span class="stat-value">1.0 : 1</span></div>
+      <div class="stat-row"><span class="stat-label">Grade A+ Threshold</span><span class="stat-value">90+ / 100</span></div>
+      <div class="stat-row"><span class="stat-label">Cooldown</span><span class="stat-value">15 bars</span></div>
+      <div class="stat-row"><span class="stat-label">Best Session</span><span class="stat-value">London/NY Overlap</span></div>
+      <div class="stat-row"><span class="stat-label">Confirmations Required</span><span class="stat-value">2+ / 5</span></div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- HOW IT WORKS -->
+<section class="section" id="how">
+<div class="container">
+  <div class="section-title">
+    <div class="tag">How It Works</div>
+    <h2>From Signal to Trade in 4 Steps</h2>
+  </div>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <h3>Connect Your MT5</h3>
+      <p>Link your MetaTrader 5 account via MetaApi. Your credentials stay encrypted and secure.</p>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <h3>AI Scans Markets</h3>
+      <p>The system scores every pair across 7 dimensions, applying Gold Engine V2 for XAUUSD.</p>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <h3>Get Graded Signals</h3>
+      <p>Signals are graded A+ to D. Grok AI verifies top signals for maximum confidence.</p>
+    </div>
+    <div class="step">
+      <div class="step-num">4</div>
+      <h3>Execute with Precision</h3>
+      <p>Smart SL/TP levels auto-calculated. Track positions and journal trades in real-time.</p>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- PRICING -->
+<section class="section" id="pricing" style="background:var(--bg2)">
+<div class="container">
+  <div class="section-title">
+    <div class="tag">Pricing</div>
+    <h2>Start Trading Smarter Today</h2>
+    <p>Get started free. Upgrade when you're ready to unlock the full power of Alpha Edge AI.</p>
+  </div>
+  <div class="pricing-cards">
+    <div class="price-card">
+      <div class="plan">Free</div>
+      <div class="price">$0 <span>/ month</span></div>
+      <div class="desc">Perfect for getting started</div>
+      <ul>
+        <li>Real-time signal scoring (10 pairs)</li>
+        <li>H4-First analysis engine</li>
+        <li>Basic candle & EMA analysis</li>
+        <li>Overview dashboard</li>
+        <li>Community access</li>
+      </ul>
+      <a href="https://ai-forex-terminal-zjuv4wwt68n27roweqei35.streamlit.app" class="btn btn-outline" target="_blank">Get Started Free</a>
+    </div>
+    <div class="price-card featured">
+      <div class="plan">Pro</div>
+      <div class="price">$99 <span>/ month</span></div>
+      <div class="desc">For serious traders</div>
+      <ul>
+        <li>Everything in Free +</li>
+        <li>Live MT5 connection & auto-sync</li>
+        <li>Gold Engine V2 (XAUUSD specialist)</li>
+        <li>Grok AI signal verification</li>
+        <li>Backtest engine</li>
+        <li>Trade journal & performance analytics</li>
+        <li>Smart SL/TP with trailing stops</li>
+        <li>Spike detection & risk alerts</li>
+      </ul>
+      <a href="https://ai-forex-terminal-zjuv4wwt68n27roweqei35.streamlit.app" class="btn btn-primary" target="_blank">Start Free Trial</a>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- TRUST -->
+<section class="section">
+<div class="container">
+  <div class="section-title">
+    <h2>Built by Traders, for Traders</h2>
+    <p>Alpha Edge AI is designed to bring discipline, consistency, and AI intelligence to your trading.</p>
+  </div>
+  <div class="trust-grid">
+    <div class="trust-card">
+      <div class="emoji">🎯</div>
+      <p>"The signal scoring system forced me to stop taking bad trades. My win rate went up just by following the grades."</p>
+      <div class="name">— Discipline-First Approach</div>
+    </div>
+    <div class="trust-card">
+      <div class="emoji">🥇</div>
+      <p>"The Gold Engine is a game-changer. It filters out noise and only shows setups with multiple confirmations."</p>
+      <div class="name">— XAUUSD Specialist Focus</div>
+    </div>
+    <div class="trust-card">
+      <div class="emoji">🤖</div>
+      <p>"Having Grok AI verify my signals before I enter gives me confidence. It's like having a second analyst on call 24/5."</p>
+      <div class="name">— AI-Verified Trading</div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- CTA -->
+<section class="cta">
+<div class="container">
+  <h2>Ready to Trade with an Edge?</h2>
+  <p>Join Alpha Edge AI today. Connect your MT5, get AI-graded signals, and start trading with discipline.</p>
+  <a href="https://ai-forex-terminal-zjuv4wwt68n27roweqei35.streamlit.app" class="btn btn-primary" style="font-size:1.05rem;padding:14px 36px" target="_blank">Launch Terminal — It's Free</a>
+</div>
+</section>
+
+<!-- DISCLAIMER BANNER -->
+<section style="background:rgba(245,158,11,0.06);border-top:1px solid rgba(245,158,11,0.15);border-bottom:1px solid rgba(245,158,11,0.15);padding:32px 0;">
+<div class="container" style="max-width:800px;text-align:center;">
+  <h3 style="color:#f59e0b;font-size:1.1rem;margin-bottom:12px;">⚠ Investment Disclaimer</h3>
+  <p style="color:#c9d1d9;font-size:0.85rem;line-height:1.7;">
+    Alpha Edge AI is an <strong>informational and educational tool only</strong>. All trading signals, AI ratings, analysis, and recommendations are provided as <strong>reference material</strong> and do NOT constitute financial advice, investment advice, or any form of professional advice.
+    Trading Forex, Gold, and other financial instruments involves <strong>substantial risk of loss</strong>. Past performance does not guarantee future results. You could lose some or all of your capital.
+    <strong>You are solely responsible for your own trading decisions.</strong> Consult a qualified financial advisor before making investment decisions.
+  </p>
+</div>
+</section>
+
+<!-- TERMS -->
+<section id="terms" style="padding:40px 0;">
+<div class="container" style="max-width:800px;">
+  <h3 style="text-align:center;color:var(--primary);font-size:1rem;letter-spacing:0.1em;margin-bottom:20px;">TERMS OF SERVICE</h3>
+  <div style="color:#8b9ab0;font-size:0.82rem;line-height:1.8;">
+    <p><strong style="color:#c9d1d9;">1. No Financial Advice</strong> — All signals, AI ratings, scores, and analysis are algorithmic outputs for reference only. They are not recommendations to buy, sell, or hold any financial instrument.</p>
+    <p><strong style="color:#c9d1d9;">2. Risk Acknowledgment</strong> — By using this platform, you acknowledge that trading involves substantial risk and that you may lose your invested capital. We make no guarantees of profitability or accuracy.</p>
+    <p><strong style="color:#c9d1d9;">3. User Responsibility</strong> — You are solely responsible for your trading decisions and any resulting financial outcomes. You should conduct your own research and/or consult a qualified financial advisor.</p>
+    <p><strong style="color:#c9d1d9;">4. MT5 Connection</strong> — If you connect your MT5 account, you do so at your own risk. We are not responsible for any trades executed through your account.</p>
+    <p><strong style="color:#c9d1d9;">5. Limitation of Liability</strong> — Alpha Edge AI shall not be liable for any direct, indirect, incidental, or consequential damages resulting from your use of the platform.</p>
+    <p><strong style="color:#c9d1d9;">6. Data Privacy</strong> — We collect only data necessary to provide our services. Your credentials are stored securely and never shared with third parties.</p>
+    <p style="margin-top:16px;color:#c9d1d9;text-align:center;"><em>By creating an account, you agree to these terms. Last updated: March 2026.</em></p>
+  </div>
+</div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+<div class="container">
+  <p style="margin-bottom:8px"><strong style="color:var(--primary)">Alpha Edge AI</strong> — AI-Powered Forex & Gold Trading Terminal</p>
+  <p>All signals are for reference only. Not financial advice. Trade at your own risk.</p>
+  <p style="margin-top:8px">© 2026 Alpha Edge AI. All rights reserved. | <a href="#terms" style="color:var(--primary);">Terms of Service</a></p>
+</div>
+</footer>
+
+<script>
+// Smooth scroll
+document.querySelectorAll('a[href^="#"]').forEach(a=>{
+  a.addEventListener('click',e=>{
+    e.preventDefault();
+    document.querySelector(a.getAttribute('href'))?.scrollIntoView({behavior:'smooth',block:'start'});
+  });
+});
+
+// Nav background on scroll
+window.addEventListener('scroll',()=>{
+  const nav=document.querySelector('nav');
+  nav.style.borderBottomColor=window.scrollY>50?'rgba(255,255,255,0.1)':'rgba(255,255,255,0.06)';
+});
+</script>
+</body>
+</html>
