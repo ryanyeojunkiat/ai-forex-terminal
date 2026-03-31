@@ -1,4 +1,10 @@
-import os, json, re
+"""
+AI FOREX TERMINAL  v14.0  (Multi-User SaaS Edition)
+Multi-page redesign: Overview · Symbol pages · Trades · Backtest
+Core fixes: H4-first signal engine, ATR-based SL/TP, symbol-specific thresholds
+Auth: Supabase Auth for multi-user, per-user MT5 & trade data
+"""
+import os, json, re, uuid
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, Tuple, List
 import numpy as np
@@ -7,395 +13,1160 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
 import streamlit as st
-import streamlit.components.v1 as st_components
+import streamlit.components.v1 as stc
 try:
     from streamlit_autorefresh import st_autorefresh
 except Exception:
     st_autorefresh = None
 
-# ============================================================
-# PAGE CONFIG
-# ============================================================
-st.set_page_config(page_title="AI Forex Terminal V12", page_icon="📈",
+st.set_page_config(page_title="Alpha Edge AI Terminal", page_icon="◈",
                    layout="wide", initial_sidebar_state="expanded")
+
+# ============================================================
+# AUTH GATE (Supabase Auth — multi-user)
+# ============================================================
+try:
+    from auth import render_auth_page, is_logged_in, get_current_user_id, get_current_email, clear_session, sign_out, get_user_settings, save_user_settings
+    _AUTH_AVAILABLE = True
+except ImportError:
+    _AUTH_AVAILABLE = False
+
+def _check_auth():
+    """Multi-user auth gate using Supabase Auth. Falls back to password if auth module unavailable."""
+    if _AUTH_AVAILABLE:
+        render_auth_page()  # blocks with st.stop() if not logged in
+        return True
+    # Fallback: simple password gate
+    _pw = os.getenv("APP_PASSWORD", "")
+    try:
+        _pw = st.secrets.get("APP_PASSWORD", _pw) or _pw
+    except Exception:
+        pass
+    if not _pw:
+        return True
+    if st.session_state.get("_authenticated"):
+        return True
+    st.markdown("""<style>
+    .login-box{max-width:360px;margin:120px auto;padding:32px;background:#0d1117;
+    border:1px solid rgba(0,212,170,0.2);border-radius:12px;text-align:center;}
+    .login-title{color:#00d4aa;font-family:'Space Mono',monospace;font-size:18px;margin-bottom:24px;}
+    </style>""", unsafe_allow_html=True)
+    st.markdown('<div class="login-box"><div class="login-title">◈ AI FOREX TERMINAL</div></div>',
+                unsafe_allow_html=True)
+    pw_input = st.text_input("Password", type="password", placeholder="Enter access password…")
+    if st.button("Enter"):
+        if pw_input == _pw:
+            st.session_state["_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    st.stop()
+
+_check_auth()
+
+# Helper: get current user ID for per-user data isolation
+def _uid():
+    """Return current user ID for filtering data. Empty string if no auth."""
+    if _AUTH_AVAILABLE and is_logged_in():
+        return get_current_user_id()
+    return ""
+
+# ============================================================
+# CSS
+# ============================================================
 st.markdown("""<style>
 html,body,[data-testid="stAppViewContainer"]{background:#080c10!important;color:#e8edf2!important;font-family:'DM Sans','Segoe UI',sans-serif;}
 [data-testid="stSidebar"]{background:#0d1117!important;border-right:1px solid rgba(255,255,255,0.06)!important;}
 [data-testid="stHeader"]{background:transparent!important;}
-[data-testid="stMetricValue"]{color:#e8edf2!important;font-family:'Space Mono',monospace!important;font-size:13px!important;}
-[data-testid="stMetricLabel"]{color:#8b9ab0!important;font-size:10px!important;}
-.stButton>button{background:rgba(0,212,170,0.08)!important;border:1px solid rgba(0,212,170,0.25)!important;color:#00d4aa!important;font-family:'Space Mono',monospace!important;border-radius:6px!important;}
+.stButton>button{background:rgba(0,212,170,0.08)!important;border:1px solid rgba(0,212,170,0.25)!important;color:#00d4aa!important;font-family:'Space Mono',monospace!important;border-radius:6px!important;font-size:12px!important;}
 .stSelectbox>div>div,.stNumberInput>div>div{background:#131a22!important;border-color:rgba(255,255,255,0.1)!important;color:#e8edf2!important;border-radius:6px!important;}
-.signal-box{padding:10px 18px;border-radius:8px;font-family:'Space Mono',monospace;font-size:13px;font-weight:700;letter-spacing:.08em;text-align:center;display:inline-block;min-width:180px;}
-.signal-buy{background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.3);color:#10b981;}
-.signal-sell{background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3);color:#ef4444;}
-.signal-wait{background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3);color:#f59e0b;}
 .panel{background:#0d1117;border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:12px 14px;margin-bottom:10px;}
 .mono-title{color:#00d4aa;font-size:11px;font-family:'Space Mono',monospace;letter-spacing:.12em;margin-bottom:8px;}
 .kv{display:flex;justify-content:space-between;gap:10px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:13px;}
 .kv:last-child{border-bottom:none;}
 .muted{color:#8b9ab0;}.good{color:#10b981;}.bad{color:#ef4444;}.warn{color:#f59e0b;}.info{color:#0ea5e9;}
 .ai-bubble{background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.25);border-left:3px solid #6366f1;border-radius:8px;padding:12px 14px;margin:8px 0;font-size:12px;color:#c7d2fe;line-height:1.75;}
-.ai-header{font-family:'Space Mono',monospace;font-size:10px;color:#6366f1;letter-spacing:.1em;margin-bottom:6px;}
-.news-HIGH{border-left:3px solid #ef4444!important;background:rgba(239,68,68,.06)!important;}
-.news-MEDIUM{border-left:3px solid #f59e0b!important;background:rgba(245,158,11,.06)!important;}
-.news-LOW{border-left:3px solid #10b981!important;background:rgba(16,185,129,.06)!important;}
-.explainer-box{background:rgba(0,212,170,.04);border:1px solid rgba(0,212,170,.12);border-left:3px solid #00d4aa;border-radius:6px;padding:10px 14px;margin:8px 0;font-size:12px;color:#8b9ab0;line-height:1.7;}
-.conf-bar{height:6px;border-radius:3px;margin:4px 0;}
+.grade-aplus{color:#00d4aa;font-weight:700;} .grade-a{color:#10b981;font-weight:700;}
+.grade-b{color:#84cc16;font-weight:700;}    .grade-c{color:#f59e0b;font-weight:700;}
+.grade-d{color:#ef4444;font-weight:700;}
+@keyframes alertpulse{0%,100%{box-shadow:0 0 18px #ef444444;}50%{box-shadow:0 0 36px #ef4444aa;}}
 </style>""", unsafe_allow_html=True)
 
 # ============================================================
 # CONSTANTS
 # ============================================================
-APP_VERSION = "V12.0"
-_ENV_TD  = os.getenv("TWELVE_DATA_API_KEY", "").strip()
-_ENV_XAI = os.getenv("XAI_API_KEY", "").strip()
+APP_VERSION = "V14.0"
 
-INTERNAL_SYMBOLS = ["EURUSD","GBPUSD","USDJPY","XAUUSD","EURCHF",
-                    "AUDUSD","USDCAD","NZDUSD","USDCHF","BTCUSD"]
-API_SYMBOL_MAP   = {"EURUSD":"EUR/USD","GBPUSD":"GBP/USD","USDJPY":"USD/JPY",
-                    "XAUUSD":"XAU/USD","EURCHF":"EUR/CHF","AUDUSD":"AUD/USD",
-                    "USDCAD":"USD/CAD","NZDUSD":"NZD/USD","USDCHF":"USD/CHF","BTCUSD":"BTC/USD"}
-SYMBOL_NAMES     = {"EURUSD":"EUR/USD Euro vs US Dollar","GBPUSD":"GBP/USD British Pound vs USD",
-                    "USDJPY":"USD/JPY US Dollar vs Japanese Yen","XAUUSD":"Gold (XAU/USD)",
-                    "EURCHF":"EUR/CHF","AUDUSD":"AUD/USD Australian Dollar","USDCAD":"USD/CAD",
-                    "NZDUSD":"NZD/USD New Zealand Dollar","USDCHF":"USD/CHF","BTCUSD":"Bitcoin vs USD"}
-INTERVAL_MAP     = {"1 Min":"1min","5 Min":"5min","15 Min":"15min",
-                    "30 Min":"30min","1 Hour":"1h","4 Hours":"4h"}
-PIP_SIZE_MAP     = {"USDJPY":0.01,"XAUUSD":0.1,"BTCUSD":1.0}
-PIP_VALUE_MAP    = {"USDJPY":9.1,"XAUUSD":10.0,"BTCUSD":1.0}
-FOREX_SYMBOLS    = {s for s in INTERNAL_SYMBOLS if s!="BTCUSD"}
-XAU_SESSIONS_UTC = [(7,16),(12,21)]
+# ── Signal alert via browser (sound + notification) ──────────
+_SIGNAL_ALERT_JS = """
+<script>
+(function() {
+  // ── Sound: generated beep using Web Audio API ──
+  function playAlertBeep(times) {
+    var ctx = new (window.AudioContext || window.webkitAudioContext)();
+    var t = ctx.currentTime;
+    for (var i = 0; i < times; i++) {
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.frequency.value = 880;
+      osc.type = "sine";
+      gain.gain.setValueAtTime(0.4, t + i*0.35);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + i*0.35 + 0.25);
+      osc.start(t + i*0.35);
+      osc.stop(t + i*0.35 + 0.3);
+    }
+  }
+  // ── Browser notification ──
+  function sendNotification(title, body) {
+    if (!("Notification" in window)) return;
+    if (Notification.permission === "granted") {
+      new Notification(title, {body: body, icon: ""});
+    } else if (Notification.permission !== "denied") {
+      Notification.requestPermission().then(function(p) {
+        if (p === "granted") new Notification(title, {body: body});
+      });
+    }
+  }
+  // Fire!
+  playAlertBeep(BEEP_COUNT);
+  sendNotification("ALERT_TITLE", "ALERT_BODY");
+})();
+</script>
+"""
 
-# ── Trading session filters (UTC hours) ──────────────────────
-SESSIONS = {
-    "London":  (7,16),   # best liquidity for EUR, GBP, CHF
-    "NewYork": (12,21),  # best for USD pairs
-    "Overlap": (12,16),  # highest volume — strongest signals
-    "Asian":   (22, 7),  # weak liquidity — avoid most pairs
+def _fire_browser_alert(title: str, body: str, beeps: int = 2):
+    """Generic browser beep + notification helper."""
+    js = (_SIGNAL_ALERT_JS
+          .replace("BEEP_COUNT", str(beeps))
+          .replace("ALERT_TITLE", title)
+          .replace("ALERT_BODY",  body))
+    stc.html(js, height=0)
+
+def fire_signal_alert(symbol, grade, direction, score):
+    """Play beep + send browser notification for AI-verified A/A+ signals."""
+    beeps = 3 if grade == "A+" else 2
+    _fire_browser_alert(f"🚨 {grade} SIGNAL — {symbol}", f"{direction} | Score {score}/100", beeps)
+
+def fire_danger_alert(symbol, sl_pips, sl_pct):
+    """Browser alert when price is dangerously close to SL."""
+    _fire_browser_alert(
+        f"⚠️ DANGER ZONE — {symbol}",
+        f"Only {sl_pips:.0f} pips from SL ({int(sl_pct)}% remaining). Consider EXIT or MOVE SL.",
+        beeps=3
+    )
+
+def fire_tp_alert(symbol, tp_label, tp_price, tp2_price=None):
+    """Browser alert when TP1 is hit — suggest going for TP2 or exiting."""
+    body = f"Price hit {tp_label}! Consider taking profit or trailing to TP2"
+    if tp2_price:
+        body += f" @ {tp2_price}"
+    _fire_browser_alert(f"🎯 {tp_label} HIT — {symbol}", body, beeps=2)
+
+def get_historical_context(symbol: str, direction: str, min_trades: int = 5) -> str:
+    """
+    Query Supabase for this trader's past performance on similar trades.
+    Returns a context string injected into Grok prompts for personalised advice.
+    Requires at least min_trades records to avoid misleading small-sample bias.
+    """
+    if not _sb_ok(): return ""
+    try:
+        rows = sb_get("journal", f"symbol=eq.{symbol}&direction=eq.{direction}&order=closed_at.desc&limit=100")
+        if len(rows) < min_trades: return ""
+        df = pd.DataFrame(rows)
+        df["pnl_r"] = pd.to_numeric(df["pnl_r"], errors="coerce").fillna(0)
+        total = len(df); wins = (df["outcome"]=="WIN").sum()
+        wr    = round(wins/total*100, 1); avg_r = round(df["pnl_r"].mean(), 2)
+        # Grade breakdown
+        grade_info = ""
+        if "grade" in df.columns:
+            gd = df.groupby("grade").apply(
+                lambda x: f"{(x['outcome']=='WIN').sum()}/{len(x)}"
+            ).to_dict()
+            grade_info = "  Grade breakdown: " + ", ".join(f"{k}:{v}" for k,v in gd.items()) + "."
+        # Session breakdown
+        sess_info = ""
+        if "session" in df.columns and df["session"].notna().any():
+            sd = df.groupby("session")["outcome"].apply(
+                lambda x: f"{(x=='WIN').sum()}/{len(x)}"
+            ).to_dict()
+            sess_info = "  By session: " + ", ".join(f"{k}:{v}" for k,v in sd.items()) + "."
+        # Recent streak
+        recent = df.head(5)["outcome"].tolist()
+        streak = "  Recent 5: " + " → ".join(recent) + "."
+        return (
+            f"\n\n📊 TRADER'S PERSONAL HISTORY ({symbol} {direction}, last {total} trades):\n"
+            f"Win rate: {wr}%  |  Avg R: {avg_r:+.2f}R{grade_info}{sess_info}{streak}\n"
+            f"Use this personal data to calibrate your recommendation — it reflects how THIS trader actually performs."
+        )
+    except Exception:
+        return ""
+
+def verify_signal_with_ai(symbol, grade, direction, score, analysis) -> bool:
+    """
+    Ask Grok to verify if a new Grade A/A+ signal is worth entering.
+    Injects trader's personal history for personalised judgement.
+    Returns True if valid, False if AI rejects. Falls back to True if no key.
+    """
+    key = get_xai_key()
+    if not key: return True
+    rsi  = fmt_num(analysis.get("rsi", 50), 1)
+    h4   = analysis.get("h4_trend", "?")
+    atr  = fmt_num(analysis.get("atr", 0), 5)
+    sess = analysis.get("session", "?")
+    hist = get_historical_context(symbol, direction, min_trades=5)
+    msg = (
+        f"NEW SIGNAL VERIFICATION — Should I enter this trade?\n"
+        f"Symbol: {symbol}  Grade: {grade}  Direction: {direction}  Score: {score}/100\n"
+        f"RSI14: {rsi}  H4 Trend: {h4}  ATR: {atr}  Session: {sess}"
+        f"{hist}\n\n"
+        f"Reply on the FIRST line with exactly: VALID or INVALID\n"
+        f"Then 1 sentence explaining why.\n"
+        f"Be strict: INVALID if RSI is extreme, H4 conflicts, session is low liquidity, "
+        f"or the trader's personal history shows poor results in these conditions."
+    )
+    resp = _grok([
+        {"role": "system", "content":
+         "You are a concise forex signal validator who uses the trader's personal performance data. UTC: "
+         + pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M")},
+        {"role": "user", "content": msg}
+    ], max_tokens=100, temperature=0.1, api_key=key) or ""
+    return "INVALID" not in resp.upper()[:40]
+# Read from env OR Streamlit Cloud secrets (for deployment)
+def _get_secret(key, default=""):
+    try:
+        val = st.secrets.get(key, "")
+        if val: return str(val).strip()
+    except Exception:
+        pass
+    return os.getenv(key, default).strip()
+
+_ENV_TD  = _get_secret("TWELVE_DATA_API_KEY")
+_ENV_XAI = _get_secret("XAI_API_KEY")
+_ENV_TE  = _get_secret("TRADING_ECONOMICS_KEY")
+_ENV_MA_TOKEN   = _get_secret("METAAPI_TOKEN")
+_ENV_MA_ACCOUNT = _get_secret("METAAPI_ACCOUNT")
+_ENV_SB_URL     = _get_secret("SUPABASE_URL")
+_ENV_SB_KEY     = _get_secret("SUPABASE_KEY")
+
+# Owner email — used to identify admin/owner account
+OWNER_EMAIL = "junkiatyeo96@gmail.com"
+
+def _is_owner():
+    """Check if current logged-in user is the platform owner."""
+    if _AUTH_AVAILABLE and is_logged_in():
+        return get_current_email() == OWNER_EMAIL
+    return False
+
+# Auto-populate session state from secrets on startup (shared API keys for all users)
+if _ENV_TD  and not st.session_state.get("td_key"):      st.session_state["td_key"]      = _ENV_TD
+if _ENV_XAI and not st.session_state.get("xai_key"):     st.session_state["xai_key"]     = _ENV_XAI
+if _ENV_TE  and not st.session_state.get("te_key"):      st.session_state["te_key"]      = _ENV_TE
+
+# Per-user MT5 credentials: load from Supabase user_settings on first login
+# (shared/default MT5 only used if no user-specific settings exist)
+def _load_user_mt5_settings():
+    """Load per-user MT5 credentials from Supabase user_settings table."""
+    if not (_AUTH_AVAILABLE and is_logged_in()): return
+    if st.session_state.get("_user_settings_loaded"): return
+    try:
+        uid = get_current_user_id()
+        _tok = st.session_state.get("auth_access_token", "")
+        settings = get_user_settings(uid, access_token=_tok)
+        if settings:
+            if settings.get("ma_token") and not st.session_state.get("ma_token"):
+                st.session_state["ma_token"] = settings["ma_token"]
+            if settings.get("ma_account") and not st.session_state.get("ma_account"):
+                st.session_state["ma_account"] = settings["ma_account"]
+            if settings.get("ma_sym_suffix"):
+                st.session_state["ma_sym_suffix"] = settings["ma_sym_suffix"]
+            if settings.get("balance"):
+                st.session_state["balance"] = float(settings["balance"])
+            if settings.get("risk_pct"):
+                st.session_state["risk_pct"] = float(settings["risk_pct"])
+    except Exception:
+        pass
+    # Owner fallback: if no user_settings saved yet, load from env (Streamlit Secrets)
+    if _is_owner():
+        if _ENV_MA_TOKEN and not st.session_state.get("ma_token"):
+            st.session_state["ma_token"] = _ENV_MA_TOKEN
+        if _ENV_MA_ACCOUNT and not st.session_state.get("ma_account"):
+            st.session_state["ma_account"] = _ENV_MA_ACCOUNT
+    st.session_state["_user_settings_loaded"] = True
+
+_load_user_mt5_settings()
+
+# Shared MT5 for PRICE DATA (all users get live prices from owner's MT5)
+# Per-user MT5 for TRADING/POSITIONS (only visible to that user via RLS)
+
+JOURNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_journal.json")
+
+# ============================================================
+# SUPABASE DATABASE (multi-user: auto-injects user_id)
+# ============================================================
+def _sb_ok(): return bool(_ENV_SB_URL and _ENV_SB_KEY)
+
+_ENV_SB_SERVICE_KEY = _get_secret("SUPABASE_SERVICE_KEY")  # service_role key — bypasses RLS
+
+def _sb_headers(extra=None):
+    h = {"apikey": _ENV_SB_KEY, "Authorization": f"Bearer {_ENV_SB_KEY}",
+         "Content-Type": "application/json", "Prefer": "return=representation"}
+    if extra: h.update(extra)
+    return h
+
+def _sb_admin_headers(extra=None):
+    """Headers using service_role key — bypasses RLS for admin/owner queries."""
+    key = _ENV_SB_SERVICE_KEY or _ENV_SB_KEY
+    h = {"apikey": key, "Authorization": f"Bearer {key}",
+         "Content-Type": "application/json", "Prefer": "return=representation"}
+    if extra: h.update(extra)
+    return h
+
+def admin_get_all(table: str, filters: str = "", limit: int = 1000) -> list:
+    """Admin-only: fetch ALL rows from a table (bypasses RLS). Owner only."""
+    if not (_sb_ok() and _is_owner()): return []
+    try:
+        url = f"{_ENV_SB_URL}/rest/v1/{table}?select=*&limit={limit}"
+        if filters: url += f"&{filters}"
+        r = requests.get(url, headers=_sb_admin_headers(), timeout=15)
+        if r.status_code == 200: return r.json()
+    except Exception: pass
+    return []
+
+def admin_get_user_count() -> int:
+    """Get total registered user count from auth.users via user_settings."""
+    if not (_sb_ok() and _is_owner()): return 0
+    try:
+        url = f"{_ENV_SB_URL}/rest/v1/user_settings?select=user_id"
+        r = requests.get(url, headers=_sb_admin_headers(), timeout=10)
+        if r.status_code == 200: return len(r.json())
+    except Exception: pass
+    return 0
+
+def sb_get(table: str, filters: str = "") -> list:
+    if not _sb_ok(): return []
+    try:
+        uid = _uid()
+        uid_filter = f"user_id=eq.{uid}" if uid else ""
+        all_filters = "&".join(f for f in [filters, uid_filter] if f)
+        url = f"{_ENV_SB_URL}/rest/v1/{table}?select=*" + (f"&{all_filters}" if all_filters else "")
+        r = requests.get(url, headers=_sb_headers(), timeout=10)
+        if r.status_code == 200: return r.json()
+    except Exception: pass
+    return []
+
+def sb_upsert(table: str, data: dict) -> bool:
+    if not _sb_ok(): return False
+    try:
+        uid = _uid()
+        if uid and "user_id" not in data:
+            data["user_id"] = uid
+        h = _sb_headers({"Prefer": "resolution=merge-duplicates,return=minimal"})
+        r = requests.post(f"{_ENV_SB_URL}/rest/v1/{table}", headers=h, json=data, timeout=10)
+        return r.status_code in (200, 201)
+    except Exception: return False
+
+def sb_insert(table: str, data: dict) -> bool:
+    if not _sb_ok(): return False
+    try:
+        uid = _uid()
+        if uid and "user_id" not in data:
+            data["user_id"] = uid
+        h = _sb_headers({"Prefer": "return=minimal"})
+        r = requests.post(f"{_ENV_SB_URL}/rest/v1/{table}", headers=h, json=data, timeout=10)
+        return r.status_code in (200, 201)
+    except Exception: return False
+
+def sb_delete(table: str, filters: str) -> bool:
+    if not _sb_ok(): return False
+    try:
+        uid = _uid()
+        uid_filter = f"user_id=eq.{uid}" if uid else ""
+        all_filters = "&".join(f for f in [filters, uid_filter] if f)
+        r = requests.delete(f"{_ENV_SB_URL}/rest/v1/{table}?{all_filters}",
+                            headers=_sb_headers(), timeout=10)
+        return r.status_code in (200, 204)
+    except Exception: return False
+
+def log_signal_to_db(symbol, direction, grade, score, ai_confirmed, session, rsi, h4):
+    sb_insert("signals", {
+        "symbol": symbol, "direction": direction, "grade": grade,
+        "score": int(score), "ai_confirmed": bool(ai_confirmed),
+        "session": session, "rsi": float(rsi), "h4_trend": h4
+    })
+
+def fetch_mt5_history_deals(token, account_id, since_hours=72):
+    """Fetch recently closed deals from MetaApi to get exit prices."""
+    region = _ma_get_region(token, account_id)
+    base = f"https://mt-client-api-v1.{region}.agiliumtrade.ai"
+    end_dt = pd.Timestamp.utcnow()
+    start_dt = end_dt - pd.Timedelta(hours=since_hours)
+    start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    end_iso   = end_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    try:
+        url = f"{base}/users/current/accounts/{account_id}/history-deals/time/{start_iso}/{end_iso}"
+        r = requests.get(url, headers={"auth-token": token}, timeout=20)
+        if r.status_code == 200: return r.json()
+    except Exception: pass
+    return []
+
+def sync_mt5_to_db():
+    """
+    Auto-sync MT5 positions with Supabase:
+    - New MT5 position  → insert to trades table
+    - Closed position   → find exit price → move to journal
+    Returns current active trades list from DB.
+    """
+    if not _sb_ok(): return []
+    ma_tok = get_ma_token(); ma_acc = get_ma_account()
+    if not ma_tok or not ma_acc: return sb_get("trades")
+
+    # Current MT5 open positions
+    mt5_positions = fetch_mt5_positions(ma_tok, ma_acc)
+    mt5_ticket_map = {}
+    for p in mt5_positions:
+        tid = str(p.get("id") or p.get("positionId") or "")
+        if tid: mt5_ticket_map[tid] = p
+
+    # Stored trades in DB
+    db_trades = sb_get("trades")
+    db_ticket_set = {t["mt5_ticket"] for t in db_trades if t.get("mt5_ticket")}
+
+    # 1 ── New MT5 positions → insert to DB
+    for ticket, pos in mt5_ticket_map.items():
+        if ticket not in db_ticket_set:
+            sym  = norm(pos.get("symbol","")).replace(".R","").replace(".r","")
+            dir_ = "Buy" if "BUY" in pos.get("type","").upper() else "Sell"
+            sl   = float(pos.get("stopLoss") or 0)
+            tp   = float(pos.get("takeProfit") or 0)
+            entry = float(pos.get("openPrice") or 0)
+            sb_upsert("trades", {
+                "id": str(uuid.uuid4()), "mt5_ticket": ticket,
+                "symbol": sym, "direction": dir_,
+                "entry": entry, "sl": sl, "tp1": tp, "tp2": tp,
+                "lot": float(pos.get("volume") or 0.01),
+                "locked_grade": "MT5-AUTO", "locked_score": 0,
+                "opened_at": pos.get("time", pd.Timestamp.utcnow().isoformat()),
+            })
+
+    # 2 ── Closed positions → move to journal
+    if db_trades:
+        deals = fetch_mt5_history_deals(ma_tok, ma_acc, since_hours=72)
+        deal_map = {}  # positionId → closing deal
+        for d in deals:
+            if "OUT" in d.get("entryType",""):
+                pid = str(d.get("positionId",""))
+                if pid: deal_map[pid] = d
+
+        for trade in db_trades:
+            ticket = trade.get("mt5_ticket","")
+            if ticket and ticket not in mt5_ticket_map:
+                # Position closed
+                deal = deal_map.get(ticket)
+                exit_price = float(deal["price"]) if deal else float(trade.get("entry",0))
+                pnl_usd    = float(deal["profit"]) if deal else None
+                entry = float(trade.get("entry",0))
+                sl    = float(trade.get("sl") or 0)
+                risk  = abs(entry - sl) if sl else 1
+                move  = (exit_price - entry) if trade.get("direction")=="Buy" else (entry - exit_price)
+                pnl_r = round(move/risk, 2) if risk > 0 else 0
+                outcome = "WIN" if pnl_r > 0 else ("LOSS" if pnl_r < 0 else "BREAKEVEN")
+                sb_insert("journal", {
+                    "mt5_ticket": ticket, "symbol": trade.get("symbol"),
+                    "direction": trade.get("direction"),
+                    "entry": entry, "exit_price": exit_price,
+                    "sl": sl, "tp1": trade.get("tp1"), "tp2": trade.get("tp2"),
+                    "lot": trade.get("lot"), "pnl_r": pnl_r, "pnl_usd": pnl_usd,
+                    "outcome": outcome, "grade": trade.get("locked_grade"),
+                    "score": trade.get("locked_score"),
+                    "opened_at": trade.get("opened_at"),
+                })
+                sb_delete("trades", f"mt5_ticket=eq.{ticket}")
+
+    return sb_get("trades")
+
+# ── Symbol-specific configs ─────────────────────────────────
+# atr_sl / atr_tp1 / atr_tp2: ATR multipliers for SL and TP levels
+# grade_aplus / grade_a / grade_b: minimum score for each grade
+# H4 alignment is a HARD requirement for A / A+
+SYMBOL_CONFIG: Dict[str, Dict] = {
+    # ── FOREX ──────────────────────────────────────────────────
+    "EURUSD": dict(name="EUR/USD",  pip=0.0001, dec=5, atr_sl=1.5, atr_tp1=2.5, atr_tp2=4.5,
+                   grade_aplus=88, grade_a=76, grade_b=62, min_rr=2.0,
+                   sessions=["London","Overlap","NewYork"], asset_class="forex",
+                   note="Best during London/NY. Avoid Asian session."),
+    "GBPUSD": dict(name="GBP/USD",  pip=0.0001, dec=5, atr_sl=1.8, atr_tp1=3.0, atr_tp2=5.0,
+                   grade_aplus=90, grade_a=78, grade_b=64, min_rr=2.0,
+                   sessions=["London","Overlap"], asset_class="forex",
+                   note="Very volatile. Strict confirmation required."),
+    "USDJPY": dict(name="USD/JPY",  pip=0.01,   dec=3, atr_sl=1.5, atr_tp1=2.5, atr_tp2=4.0,
+                   grade_aplus=86, grade_a=74, grade_b=60, min_rr=1.8,
+                   sessions=["Asian","London","Overlap"], asset_class="forex",
+                   note="Tokyo active. Watch BOJ intervention risk."),
+    "AUDUSD": dict(name="AUD/USD",  pip=0.0001, dec=5, atr_sl=1.5, atr_tp1=2.5, atr_tp2=4.0,
+                   grade_aplus=88, grade_a=76, grade_b=62, min_rr=2.0,
+                   sessions=["Asian","London"], asset_class="forex",
+                   note="RBA sensitive. Commodity-linked."),
+    "NZDUSD": dict(name="NZD/USD",  pip=0.0001, dec=5, atr_sl=1.5, atr_tp1=2.5, atr_tp2=4.0,
+                   grade_aplus=88, grade_a=76, grade_b=62, min_rr=2.0,
+                   sessions=["Asian","London"], asset_class="forex",
+                   note="Dairy-linked. Best in Asian/London."),
+    "EURCHF": dict(name="EUR/CHF",  pip=0.0001, dec=5, atr_sl=2.0, atr_tp1=2.5, atr_tp2=4.0,
+                   grade_aplus=90, grade_a=78, grade_b=64, min_rr=1.8,
+                   sessions=["London","Overlap"], asset_class="forex",
+                   note="Low volatility. SNB intervention risk."),
+    "GBPJPY": dict(name="GBP/JPY",  pip=0.01,   dec=3, atr_sl=2.0, atr_tp1=3.5, atr_tp2=6.0,
+                   grade_aplus=92, grade_a=80, grade_b=66, min_rr=2.0,
+                   sessions=["London","Overlap"], asset_class="forex",
+                   note="'The Beast' — extremely volatile. Tight risk management required."),
+    "EURJPY": dict(name="EUR/JPY",  pip=0.01,   dec=3, atr_sl=1.8, atr_tp1=3.0, atr_tp2=5.0,
+                   grade_aplus=90, grade_a=78, grade_b=64, min_rr=2.0,
+                   sessions=["London","Overlap","Asian"], asset_class="forex",
+                   note="Carry trade pair. Strong trends."),
+    # ── GOLD ───────────────────────────────────────────────────
+    "XAUUSD": dict(name="Gold",     pip=0.1,    dec=2, atr_sl=2.5, atr_tp1=4.0, atr_tp2=7.0,
+                   grade_aplus=92, grade_a=82, grade_b=68, min_rr=2.5,
+                   sessions=["London","Overlap"],
+                   note="High volatility. Only trade London/NY overlap."),
+    # ── CRUDE OIL ──────────────────────────────────────────────
+    "XTIUSD": dict(name="WTI Oil",  pip=0.01,   dec=2, atr_sl=2.0, atr_tp1=3.5, atr_tp2=6.0,
+                   grade_aplus=88, grade_a=76, grade_b=62, min_rr=2.0,
+                   sessions=["London","Overlap","NewYork"], asset_class="oil",
+                   note="News-driven. EIA/OPEC events cause spikes. Trade NY session."),
 }
-# Which pairs prefer which session
-PAIR_SESSIONS = {
-    "EURUSD":["London","Overlap","NewYork"],
-    "GBPUSD":["London","Overlap","NewYork"],
-    "USDJPY":["Asian","London","Overlap"],
-    "EURCHF":["London","Overlap"],
-    "AUDUSD":["Asian","London"],
-    "USDCAD":["NewYork","Overlap"],
-    "NZDUSD":["Asian","London"],
-    "USDCHF":["London","Overlap","NewYork"],
-    "BTCUSD":["London","NewYork","Overlap"],
-    "XAUUSD":["London","Overlap","NewYork"],
+ACTIVE_SYMBOLS = list(SYMBOL_CONFIG.keys())
+
+API_SYMBOL_MAP = {
+    "EURUSD":"EUR/USD","GBPUSD":"GBP/USD","USDJPY":"USD/JPY",
+    "XAUUSD":"XAU/USD","EURCHF":"EUR/CHF","AUDUSD":"AUD/USD",
+    "NZDUSD":"NZD/USD","GBPJPY":"GBP/JPY","EURJPY":"EUR/JPY",
+    "XTIUSD":"XTI/USD",
 }
+INTERVAL_OPTIONS = {"5 Min":"5min","15 Min":"15min","30 Min":"30min","1 Hour":"1h","4 Hours":"4h"}
+SESSIONS_UTC = {"London":(7,16),"NewYork":(12,21),"Overlap":(12,16),"Asian":(22,7)}
+
+_MA_PROVISION_URL = "https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai"
+_GROK_MODELS = ["grok-4-1-fast-non-reasoning","grok-4-1-fast-reasoning",
+                "grok-4.20-0309-non-reasoning","grok-4.20-0309-reasoning"]
+
+# MetaApi interval → timeframe string
+MA_TIMEFRAME_MAP = {"5min":"5m","15min":"15m","30min":"30m","1h":"1h","4h":"4h","1d":"1d"}
+# Interval → minutes (for startTime calculation)
+MA_INTERVAL_MINS = {"5min":5,"15min":15,"30min":30,"1h":60,"4h":240,"1d":1440}
 
 # ============================================================
 # HELPERS
 # ============================================================
 def norm(s): return str(s).upper().replace("/","").strip()
-def to_api_symbol(s): return API_SYMBOL_MAP.get(norm(s),norm(s))
-def pip_size(s): return PIP_SIZE_MAP.get(norm(s),0.0001)
-def pip_value(s): return PIP_VALUE_MAP.get(norm(s),10.0)
+def cfg(sym): return SYMBOL_CONFIG.get(norm(sym), SYMBOL_CONFIG["EURUSD"])
+def to_api_sym(s): return API_SYMBOL_MAP.get(norm(s), norm(s))
 def get_td_key():  return st.session_state.get("td_key","") or _ENV_TD
 def get_xai_key(): return st.session_state.get("xai_key","") or _ENV_XAI
-def get_grok_model(): return st.session_state.get("grok_model","grok-4-1-fast-non-reasoning")
-def get_ma_token():   return st.session_state.get("ma_token","") or os.environ.get("METAAPI_TOKEN","")
-def get_ma_account(): return st.session_state.get("ma_account","") or os.environ.get("METAAPI_ACCOUNT","")
+def get_te_key():  return st.session_state.get("te_key","")  or _ENV_TE
+def get_grok_model(): return st.session_state.get("grok_model", _GROK_MODELS[0])
+# Shared MT5 for PRICE DATA — all users see live prices via owner's MT5
+def get_ma_token_price():   return _ENV_MA_TOKEN or ""
+def get_ma_account_price(): return _ENV_MA_ACCOUNT or ""
 
-# FP Markets MT5 symbol map — raw accounts use .r suffix
-# Standard accounts use no suffix; override via sidebar if needed
-_MA_SYM_SUFFIX = ""  # set to ".r" if on FP Markets Raw account
-MT5_SYMBOL_MAP: Dict[str,str] = {
-    "EURUSD":"EURUSD","GBPUSD":"GBPUSD","USDJPY":"USDJPY",
-    "XAUUSD":"XAUUSD","AUDUSD":"AUDUSD","USDCAD":"USDCAD",
-    "NZDUSD":"NZDUSD","USDCHF":"USDCHF","BTCUSD":"BTCUSD",
-}
-def mt5_symbol(s:str) -> str:
-    suffix = st.session_state.get("ma_sym_suffix","")
-    base   = MT5_SYMBOL_MAP.get(norm(s), norm(s))
-    return base + suffix
+# Per-user MT5 for TRADING — owner gets env fallback, others need own credentials
+def get_ma_token():
+    user_tok = st.session_state.get("ma_token", "")
+    return user_tok or (_ENV_MA_TOKEN if _is_owner() else "")
+def get_ma_account():
+    user_acc = st.session_state.get("ma_account", "")
+    return user_acc or (_ENV_MA_ACCOUNT if _is_owner() else "")
+
+def fmt_price(v, sym=""):
+    if v is None or (isinstance(v,float) and pd.isna(v)): return "—"
+    d = cfg(sym).get("dec",5)
+    return f"{float(v):.{d}f}"
+
+def fmt_num(v, d=2):
+    if v is None or (isinstance(v,float) and pd.isna(v)): return "—"
+    return f"{float(v):.{d}f}"
+
+def grade_color(g):
+    return {"A+":"#00d4aa","A":"#10b981","B":"#84cc16","C":"#f59e0b","D":"#ef4444"}.get(str(g),"#8b9ab0")
+
+def market_is_open(sym):
+    if cfg(sym).get("asset_class") == "crypto":
+        return True, "24/7"
+    now = pd.Timestamp.utcnow(); wd = now.weekday()
+    if wd == 5: return False, "CLOSED"
+    if wd == 6 and now.hour < 22: return False, "CLOSED"
+    return True, "LIVE"
+
+def get_session_now():
+    h = pd.Timestamp.utcnow().hour
+    if 12 <= h < 16: return "London/NY Overlap"
+    if 7  <= h < 16: return "London"
+    if 12 <= h < 21: return "New York"
+    return "Asian/Off-peak"
+
+def session_ok(sym):
+    """Returns True if current time is a preferred session for this symbol."""
+    h = pd.Timestamp.utcnow().hour
+    s = SYMBOL_CONFIG.get(norm(sym), {}).get("sessions", ["London","NewYork"])
+    if "Overlap" in s and 12 <= h < 16: return True, "London/NY Overlap"
+    if "London"  in s and 7  <= h < 16: return True, "London"
+    if "NewYork" in s and 12 <= h < 21: return True, "New York"
+    if "Asian"   in s and (h >= 22 or h < 7): return True, "Asian"
+    return False, "Off-peak"
 
 # ============================================================
-# METAAPI REST  — real-time FP Markets MT5 price + positions
+# METAAPI
 # ============================================================
-_MA_PROVISION_URL = "https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai"
-
 @st.cache_data(ttl=120)
-def _ma_get_region(token:str, account_id:str) -> str:
-    """Cache the account region so we build the right client URL."""
+def _ma_get_region(token, account_id):
     try:
         r = requests.get(f"{_MA_PROVISION_URL}/users/current/accounts/{account_id}",
                          headers={"auth-token":token}, timeout=8)
         if r.status_code == 200:
             return r.json().get("region","new-york")
-    except Exception: pass
+    except: pass
     return "new-york"
 
-def _ma_client_url(token:str, account_id:str) -> str:
-    region = _ma_get_region(token, account_id)
-    return f"https://mt-client-api-v1.{region}.agiliumtrade.ai"
+def _ma_base(token, account_id):
+    return f"https://mt-client-api-v1.{_ma_get_region(token, account_id)}.agiliumtrade.ai"
 
-@st.cache_data(ttl=3)   # 3-second cache → near real-time
-def fetch_mt5_price(symbol:str, token:str, account_id:str) -> Optional[Dict]:
-    """Returns {bid, ask, mid, spread_pips, symbol} or None."""
+def _mt5_sym(s):
+    suffix = st.session_state.get("ma_sym_suffix","")
+    return norm(s) + suffix
+
+@st.cache_data(ttl=3)
+def fetch_mt5_price(symbol, token, account_id):
     if not token or not account_id: return None
-    base = _ma_client_url(token, account_id)
-    sym  = mt5_symbol(symbol)
-    def _try(s):
+    base = _ma_base(token, account_id)
+    for sym in [_mt5_sym(symbol), norm(symbol)]:
         try:
-            r = requests.get(f"{base}/users/current/accounts/{account_id}/symbols/{s}/current-price",
+            r = requests.get(f"{base}/users/current/accounts/{account_id}/symbols/{sym}/current-price",
                              headers={"auth-token":token}, timeout=5)
             if r.status_code == 200:
                 d = r.json()
                 bid = float(d.get("bid",0)); ask = float(d.get("ask",0))
-                mid = (bid+ask)/2
-                ps  = pip_size(symbol)
+                ps = cfg(symbol).get("pip",0.0001)
                 spread = round(abs(ask-bid)/ps, 1) if ps else 0
-                return {"bid":bid,"ask":ask,"mid":mid,"spread_pips":spread,
-                        "symbol":symbol,"mt5_sym":s,"ts":d.get("time","")}
-        except Exception: pass
-        return None
-    result = _try(sym)
-    if result is None and sym != norm(symbol):          # fallback: no suffix
-        result = _try(norm(symbol))
-    return result
+                return {"bid":bid,"ask":ask,"mid":(bid+ask)/2,"spread_pips":spread,"mt5_sym":sym}
+        except: pass
+    return None
 
 @st.cache_data(ttl=5)
-def fetch_mt5_positions(token:str, account_id:str) -> List[Dict]:
-    """Returns list of open MT5 positions."""
+def fetch_mt5_positions(token, account_id):
     if not token or not account_id: return []
-    base = _ma_client_url(token, account_id)
     try:
-        r = requests.get(f"{base}/users/current/accounts/{account_id}/positions",
+        r = requests.get(f"{_ma_base(token,account_id)}/users/current/accounts/{account_id}/positions",
                          headers={"auth-token":token}, timeout=5)
         if r.status_code == 200: return r.json()
-    except Exception: pass
+    except: pass
     return []
 
 @st.cache_data(ttl=30)
-def fetch_mt5_account_info(token:str, account_id:str) -> Optional[Dict]:
-    """Returns account balance/equity/margin info."""
+def fetch_mt5_account_info(token, account_id):
     if not token or not account_id: return None
-    base = _ma_client_url(token, account_id)
     try:
-        r = requests.get(f"{base}/users/current/accounts/{account_id}/account-information",
+        r = requests.get(f"{_ma_base(token,account_id)}/users/current/accounts/{account_id}/account-information",
                          headers={"auth-token":token}, timeout=5)
         if r.status_code == 200: return r.json()
-    except Exception: pass
+    except: pass
     return None
 
-def test_mt5_connection(token:str, account_id:str) -> Tuple[bool,str]:
-    """Verbose test — tries provisioning API first, then client API."""
-    lines = []
+def test_mt5_connection(token, account_id):
     headers = {"auth-token": token}
-
-    # Step 1: hit provisioning API to get account meta + region
     prov_url = f"{_MA_PROVISION_URL}/users/current/accounts/{account_id}"
-    lines.append(f"① Provisioning: {prov_url[:60]}…")
     region = "new-york"
     try:
         rp = requests.get(prov_url, headers=headers, timeout=8)
-        lines.append(f"   HTTP {rp.status_code}")
+        if rp.status_code == 401: return False, "❌ 401 Unauthorised — token wrong or expired"
+        if rp.status_code == 404: return False, "❌ 404 Account not found — check Account ID"
         if rp.status_code == 200:
-            acc = rp.json()
-            region = acc.get("region", "new-york")
-            state  = acc.get("state","?")
-            lines.append(f"   region={region}  state={state}")
-        elif rp.status_code == 401:
-            return False, "❌ 401 Unauthorised — token is wrong or expired"
-        elif rp.status_code == 404:
-            return False, "❌ 404 Account not found — check Account ID"
-        else:
-            lines.append(f"   body: {rp.text[:120]}")
+            acc = rp.json(); region = acc.get("region","new-york")
+            state = acc.get("state","?")
+            if state == "UNDEPLOYED":
+                return False, f"❌ Account UNDEPLOYED — click ▶ Deploy first (region={region})"
     except Exception as e:
-        lines.append(f"   ERROR: {e}")
-
-    # Step 2: hit client API for account-information
-    client_base = f"https://mt-client-api-v1.{region}.agiliumtrade.ai"
-    info_url = f"{client_base}/users/current/accounts/{account_id}/account-information"
-    lines.append(f"② Client API ({region}): …/account-information")
+        return False, f"❌ Provisioning error: {e}"
+    client_url = f"https://mt-client-api-v1.{region}.agiliumtrade.ai"
     try:
-        rc = requests.get(info_url, headers=headers, timeout=8)
-        lines.append(f"   HTTP {rc.status_code}")
+        rc = requests.get(f"{client_url}/users/current/accounts/{account_id}/account-information",
+                          headers=headers, timeout=8)
         if rc.status_code == 200:
             d = rc.json()
-            bal  = d.get("balance","?")
-            cur  = d.get("currency","USD")
-            name = d.get("name","?")
-            return True, f"✅ Connected — {name}  Balance: {bal} {cur}"
-        else:
-            lines.append(f"   body: {rc.text[:200]}")
+            return True, f"✅ Connected — {d.get('name','?')}  Balance: {d.get('balance','?')} {d.get('currency','USD')}"
+        return False, f"❌ Client API HTTP {rc.status_code}: {rc.text[:120]}"
     except Exception as e:
-        lines.append(f"   ERROR: {e}")
+        return False, f"❌ Client error: {e}"
 
-    return False, "\n".join(lines)
-
-def deploy_mt5_account(token:str, account_id:str) -> Tuple[bool,str]:
-    """POST deploy endpoint — wakes up an UNDEPLOYED account."""
-    url = f"{_MA_PROVISION_URL}/users/current/accounts/{account_id}/deploy"
+def deploy_mt5_account(token, account_id):
     try:
-        r = requests.post(url, headers={"auth-token":token}, timeout=10)
+        r = requests.post(f"{_MA_PROVISION_URL}/users/current/accounts/{account_id}/deploy",
+                          headers={"auth-token":token}, timeout=10)
         if r.status_code in (200,204):
-            return True,"✅ Deploy request sent. Account connecting — wait 30s then Test MT5 again."
-        else:
-            return False,f"Deploy failed HTTP {r.status_code}: {r.text[:200]}"
+            return True, "✅ Deploy sent. Wait 30s then Test MT5."
+        return False, f"Deploy failed HTTP {r.status_code}: {r.text[:120]}"
     except Exception as e:
-        return False,f"Deploy error: {e}"
+        return False, f"Deploy error: {e}"
 
-def fmt_price(v,sym=""):
-    if v is None or (isinstance(v,float) and pd.isna(v)): return "—"
-    s=norm(sym)
-    return f"{float(v):.3f}" if s in ("USDJPY","XAUUSD","BTCUSD") else f"{float(v):.5f}"
-def fmt_num(v,d=2):
-    if v is None or (isinstance(v,float) and pd.isna(v)): return "—"
-    return f"{float(v):.{d}f}"
-def fmt_rr(v):
-    if v is None or (isinstance(v,float) and pd.isna(v)): return "—"
-    return f"1 : {float(v):.2f}"
-def score_to_grade(s):
-    if s>=90: return "A+"
-    if s>=80: return "A"
-    if s>=70: return "B"
-    if s>=60: return "C"
-    return "D"
-def grade_color(g):
-    return {"A+":"#00d4aa","A":"#10b981","B":"#84cc16","C":"#f59e0b","D":"#ef4444"}.get(g,"#8b9ab0")
-def market_is_open(symbol):
-    now=pd.Timestamp.utcnow(); wd=now.weekday(); s=norm(symbol)
-    if s in FOREX_SYMBOLS:
-        if wd==5: return False,"CLOSED"
-        if wd==6 and now.hour<22: return False,"CLOSED"
-    return True,"LIVE"
-def is_xau_session_ok(ts):
-    h=int(ts.hour); return any(a<=h<=b for a,b in XAU_SESSIONS_UTC)
+def _ma_market_data_base(token, account_id):
+    """Market-data API uses a different subdomain from client API."""
+    region = _ma_get_region(token, account_id)
+    return f"https://mt-market-data-client-api-v1.{region}.agiliumtrade.ai"
 
-def session_score(symbol:str, ts:pd.Timestamp) -> Tuple[int,str]:
-    """Returns (score_bonus 0-15, session_name). Higher bonus = better session."""
-    h = ts.hour
-    s = norm(symbol)
-    preferred = PAIR_SESSIONS.get(s, ["London","NewYork"])
-    # Overlap 12-16 UTC = best
-    if 12<=h<16 and "Overlap" in preferred: return 15,"London/NY Overlap ✓"
-    if SESSIONS["London"][0]<=h<SESSIONS["London"][1] and "London" in preferred: return 10,"London Session ✓"
-    if SESSIONS["NewYork"][0]<=h<SESSIONS["NewYork"][1] and "NewYork" in preferred: return 10,"NY Session ✓"
-    if "Asian" in preferred and (h>=22 or h<7): return 5,"Asian Session (weak)"
-    if h>=22 or h<7: return 0,"Asian Session (avoid)"
-    return 5,"Off-peak"
+@st.cache_data(ttl=60)
+def fetch_bars_ma(symbol, interval, bars, token, account_id):
+    """Fetch OHLCV bars from MetaApi historical candles endpoint.
+    Returns a DataFrame identical in structure to fetch_bars(), or raises on error."""
+    if not token or not account_id:
+        raise ValueError("MetaApi token/account not configured")
+    tf = MA_TIMEFRAME_MAP.get(interval)
+    if not tf:
+        raise ValueError(f"Unsupported interval for MetaApi: {interval}")
+    mins  = MA_INTERVAL_MINS.get(interval, 15)
+    # startTime = now minus (bars * interval) with 20% buffer for weekends/gaps
+    delta_mins = int(bars * mins * 1.4)
+    start_dt   = pd.Timestamp.utcnow() - pd.Timedelta(minutes=delta_mins)
+    start_iso  = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    mt_sym = _mt5_sym(symbol)
+    base   = _ma_market_data_base(token, account_id)
+    url    = (f"{base}/users/current/accounts/{account_id}"
+              f"/historical-market-data/symbols/{mt_sym}/timeframes/{tf}/candles"
+              f"?startTime={start_iso}&limit={bars}")
+    r = requests.get(url, headers={"auth-token": token}, timeout=30)
+    if r.status_code == 404:
+        # Try without broker suffix
+        url2 = url.replace(f"/symbols/{mt_sym}/", f"/symbols/{norm(symbol)}/")
+        r = requests.get(url2, headers={"auth-token": token}, timeout=30)
+    if r.status_code == 504 or (r.status_code != 200 and "not connected" in r.text.lower()):
+        raise ValueError("MetaApi account not connected — click Deploy in sidebar")
+    if r.status_code != 200:
+        raise ValueError(f"MetaApi candles HTTP {r.status_code}: {r.text[:120]}")
+    candles = r.json()
+    if not candles:
+        raise ValueError(f"MetaApi returned 0 candles for {symbol} {interval}")
+    df = pd.DataFrame(candles)
+    df["time"] = pd.to_datetime(df["time"], utc=True, errors="coerce")
+    for c in ["open","high","low","close"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    if "tickVolume" in df.columns:
+        df["volume"] = pd.to_numeric(df["tickVolume"], errors="coerce")
+    return df.sort_values("time").dropna(subset=["time","open","high","low","close"]).reset_index(drop=True)
 
 # ============================================================
-# GROK CLIENT  — V12 fix: key passed explicitly, no stale cache
+# GROK
 # ============================================================
-def _grok(messages:List[Dict], max_tokens:int=400, temperature:float=0.25,
-          api_key:str="", model:str="") -> Optional[str]:
-    """
-    V12 Fix: api_key passed as explicit param so callers can pass the
-    current session key directly — no stale global reference.
-    model defaults to session_state selection (sidebar dropdown).
-    """
+def _grok(messages, max_tokens=400, temperature=0.25, api_key="", model=""):
     key = api_key or get_xai_key()
-    if not key:
-        return None
+    if not key: return None
     mdl = model or get_grok_model()
     try:
-        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-        payload = {
-            "model": mdl,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            # temperature clamped to [0, 1] — xAI rejects values outside this range
-            "temperature": float(max(0.0, min(1.0, temperature))),
-        }
         r = requests.post("https://api.x.ai/v1/chat/completions",
-                          headers=headers, json=payload, timeout=25)
-        # Capture real error body before raising
+                          headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},
+                          json={"model":mdl,"messages":messages,"max_tokens":max_tokens,
+                                "temperature":float(max(0.0,min(1.0,temperature)))},
+                          timeout=25)
         if r.status_code != 200:
-            try:
-                body = r.json()
-                msg  = body.get("error", {}).get("message") or body.get("message") or r.text[:120]
-            except Exception:
-                msg = r.text[:120]
+            try: msg = r.json().get("error",{}).get("message") or r.text[:120]
+            except: msg = r.text[:120]
             return f"[Grok {r.status_code}: {msg}]"
         return r.json()["choices"][0]["message"]["content"].strip()
-    except Exception as exc:
-        return f"[Grok error: {exc}]"
-
-def test_grok_connection(api_key:str="") -> Tuple[bool,str]:
-    """Quick ping to verify the API key works."""
-    mdl = get_grok_model()
-    result = _grok([{"role":"user","content":"Reply with the single word: OK"}],
-                   max_tokens=5, temperature=0, api_key=api_key)
-    if result is None: return False, "No API key set"
-    if result.startswith("[Grok"): return False, result
-    return True, f"Connected ✓ (model: {mdl} replied: {result[:30]})"
+    except Exception as e:
+        return f"[Grok error: {e}]"
 
 @st.cache_data(ttl=90)
-def get_news_sentiment(symbol:str, xai_key:str) -> Dict[str,Any]:
-    """
-    V12 Fix: xai_key is now an explicit cache parameter.
-    Cache key = (symbol, xai_key) — changes when key changes, no stale results.
-    """
+def get_news_sentiment(symbol, xai_key):
     if not xai_key:
-        return {"risk":"LOW","adj":0,"bias":"neutral","summary":"No xAI key set",
-                "events":[],"ok":False}
-    sym_name = SYMBOL_NAMES.get(norm(symbol), symbol)
-    system_msg = ("You are a professional forex market analyst with real-time news access. "
-                  "Be concise. UTC: " + pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M"))
-    user_msg = f"""Analyze CURRENT market news sentiment for {sym_name}.
-Return ONLY valid JSON (no markdown):
-{{"risk":"HIGH|MEDIUM|LOW","adj":<int -15 to 15>,"bias":"bull|bear|neutral",
-  "summary":"<max 20 words>","events":["<event1>","<event2>","<event3>"]}}
-Rules: HIGH=major event within 2h(NFP,FOMC,CPI,central bank). adj=0 neutral,±5 mild,±10 strong,±15 extreme.
-Negative adj if imminent high-impact event regardless of direction."""
-    raw = _grok([{"role":"system","content":system_msg},{"role":"user","content":user_msg}],
-                max_tokens=200, temperature=0.1, api_key=xai_key)
-    if not raw or raw.startswith("[Grok error"):
-        return {"risk":"LOW","adj":0,"bias":"neutral","summary":raw or "Unavailable","events":[],"ok":False}
+        return {"risk":"LOW","adj":0,"bias":"neutral","summary":"No xAI key","events":[],"ok":False}
+    sym_name = SYMBOL_CONFIG.get(norm(symbol),{}).get("name", symbol)
+    # Build precise session context so Grok doesn't hallucinate market hours
+    now_utc   = pd.Timestamp.utcnow()
+    utc_str   = now_utc.strftime("%Y-%m-%d %H:%M UTC")
+    utc_h     = now_utc.hour + now_utc.minute / 60
+    active_sessions = []
+    if 7  <= utc_h < 16: active_sessions.append("London")
+    if 12 <= utc_h < 21: active_sessions.append("New York")
+    if 12 <= utc_h < 16: active_sessions.append("London-NY Overlap")
+    if utc_h >= 22 or utc_h < 7: active_sessions.append("Asian")
+    if not active_sessions: active_sessions.append("Off-peak (21:00-22:00 UTC)")
+    sess_str  = ", ".join(active_sessions)
+    ny_close_h = 21
+    if utc_h < ny_close_h:
+        ny_left = round(ny_close_h - utc_h, 1)
+        ny_str  = f"New York closes in {ny_left:.1f}h (at 21:00 UTC)"
+    else:
+        ny_str  = "New York session is CLOSED"
+    raw = _grok([
+        {"role":"system","content":(
+            f"You are a forex analyst with REAL-TIME market awareness.\n"
+            f"EXACT TIME NOW: {utc_str}\n"
+            f"ACTIVE SESSIONS: {sess_str}\n"
+            f"{ny_str}\n"
+            f"RULE: Do NOT guess or approximate market hours. Use ONLY the exact times above. "
+            f"If you mention session timing, it must match these numbers exactly."
+        )},
+        {"role":"user","content":
+         f"Analyze CURRENT news sentiment for {sym_name}.\n"
+         f"Current time: {utc_str}. Active: {sess_str}.\n"
+         f'Return ONLY JSON: {{"risk":"HIGH|MEDIUM|LOW","adj":<-15 to 15>,"bias":"bull|bear|neutral",'
+         f'"summary":"<20 words max>","events":["ev1","ev2","ev3"]}}\n'
+         f"HIGH=major event within 2h (NFP/FOMC/CPI/CB). Negative adj for imminent HIGH-risk events.\n"
+         f"DO NOT mention session timing unless directly relevant to a news event."}
+    ], max_tokens=200, temperature=0.1, api_key=xai_key)
+    if not raw or raw.startswith("[Grok"):
+        return {"risk":"LOW","adj":0,"bias":"neutral","summary":raw or "Error","events":[],"ok":False}
     try:
         obj = json.loads(re.sub(r"```json|```","",raw).strip())
-        return {"risk":obj.get("risk","LOW"),"adj":int(obj.get("adj",0)),"bias":obj.get("bias","neutral"),
-                "summary":obj.get("summary",""),"events":obj.get("events",[]),"ok":True}
+        return {"risk":obj.get("risk","LOW"),"adj":int(obj.get("adj",0)),
+                "bias":obj.get("bias","neutral"),"summary":obj.get("summary",""),
+                "events":obj.get("events",[]),"ok":True}
     except:
         return {"risk":"LOW","adj":0,"bias":"neutral","summary":raw[:100],"events":[],"ok":False}
 
-def get_ai_trade_advice(plan, df:pd.DataFrame, live_health:Optional[Dict],
-                        news:Optional[Dict], user_question:str="") -> str:
+def get_ai_analysis(symbol, direction, score, grade, entry, sl, tp1, tp2,
+                    atr, rsi, macd_hist, session, news, df_tail):
     key = get_xai_key()
-    if not key: return "⚠ No xAI key. Enter it in the sidebar."
-    row = df.iloc[-1]
-    recent = df.tail(10)[["open","high","low","close"]].round(5).to_string(index=False)
-    h_info = (f"R={live_health['r_now']:+.2f}, {live_health['status']}, {live_health['advice']}"
-              if live_health else "not in trade")
-    n_info = (f"Risk={news['risk']}, bias={news['bias']}, {news['summary']}"
-              if (news and news.get("ok")) else "no news data")
-    q_line = f"\nTrader question: {user_question}" if user_question.strip() else ""
-    msg = f"""Active {plan.symbol} trade:
-Dir={plan.direction} Entry={fmt_price(plan.entry,plan.symbol)} SL={fmt_price(plan.sl,plan.symbol)}
-TP1={fmt_price(plan.tp1,plan.symbol)} TP2={fmt_price(plan.tp2,plan.symbol)}
-Strategy={plan.strategy} Score={plan.setup_score}({plan.setup_grade})→Final={plan.final_score}
-Price={fmt_price(float(row['close']),plan.symbol)} RSI={fmt_num(row.get('rsi14'),1)} ATR={fmt_num(row.get('atr14'),5)}
-MACD_hist={fmt_num(row.get('macd_hist'),5)} Session={plan.session_label}
-Health: {h_info}
-News: {n_info}
-Last 10 bars:\n{recent}{q_line}
-→ HOLD, EXIT, or MOVE SL? Brief reasoning (3-4 sentences max)."""
-    return _grok([{"role":"system","content":"You are a professional forex risk manager. Be direct and concise."},
-                  {"role":"user","content":msg}],
-                 max_tokens=300, temperature=0.3, api_key=key) or "Empty response."
+    if not key: return "⚠ No xAI key."
+    recent = df_tail[["open","high","low","close"]].round(cfg(symbol)["dec"]).to_string(index=False)
+    n_info = f"Risk={news['risk']}, bias={news['bias']}, {news['summary']}" if news and news.get("ok") else "no data"
+    msg = (f"Symbol: {symbol}  Dir: {direction}  Grade: {grade} ({score}/100)\n"
+           f"Entry: {fmt_price(entry,symbol)}  SL: {fmt_price(sl,symbol)}  TP1: {fmt_price(tp1,symbol)}  TP2: {fmt_price(tp2,symbol)}\n"
+           f"ATR: {fmt_num(atr,5)}  RSI: {fmt_num(rsi,1)}  MACD_hist: {fmt_num(macd_hist,5)}\n"
+           f"Session: {session}  News: {n_info}\nLast 10 bars:\n{recent}\n"
+           f"→ Is this a valid {direction} setup? Key risks? 3-4 sentences max.")
+    return _grok([{"role":"system","content":"You are a professional forex risk manager. Be direct."},
+                  {"role":"user","content":msg}], max_tokens=300, temperature=0.3, api_key=key) or "No response."
 
 # ============================================================
-# DATA & INDICATORS
+# GROK-PRIMARY SIGNAL ENGINE — AI decides, Calculator backs up
 # ============================================================
-def td_get(endpoint:str, params:Dict) -> Dict:
+@st.cache_data(ttl=120)
+def grok_primary_analysis(symbol, close, atr, rsi, macd_val, macd_hist,
+                          ema20, ema50, ema200, h4_trend, session_name,
+                          calc_direction, calc_score, calc_grade,
+                          sl_calc, tp1_calc, tp2_calc,
+                          last_10_bars_str, xai_key, bb_upper=0, bb_lower=0):
+    """
+    GROK-PRIMARY: Grok receives ALL technical data + calculator score,
+    then makes the FINAL trading decision with its own AI Rating.
+    Returns dict with: ai_rating, direction, action, entry, sl, tp1, tp2,
+    reasoning, confidence, key_factors
+    """
+    if not xai_key:
+        return {"ai_rating": 0, "direction": calc_direction, "action": "WAIT",
+                "reasoning": "No xAI key — using calculator only.", "confidence": "LOW",
+                "key_factors": [], "error": True}
+
+    c = cfg(symbol)
+    sym_name = c.get("name", symbol)
+    asset_class = c.get("asset_class", "forex")
+    pip_size = c.get("pip", 0.0001)
+    dec = c.get("dec", 5)
+
+    # Build time context
+    now_utc = pd.Timestamp.utcnow()
+    utc_str = now_utc.strftime("%Y-%m-%d %H:%M UTC")
+    day_of_week = now_utc.strftime("%A")
+
+    prompt = f"""You are an elite institutional forex & commodities trader with 20 years of experience.
+You have access to REAL technical data below. Combine this with your knowledge of:
+- Current global macro environment, central bank policies, geopolitical events
+- Typical price behavior patterns for {sym_name} ({asset_class})
+- Session liquidity ({session_name}), day-of-week effects ({day_of_week})
+- News impact, risk-on/risk-off sentiment, intermarket correlations
+
+═══ TECHNICAL DATA FOR {symbol} ═══
+Time: {utc_str} ({day_of_week})
+Session: {session_name}
+Asset: {sym_name} ({asset_class})
+
+PRICE: {close:.{dec}f}
+ATR(14): {atr:.{dec}f}
+RSI(14): {rsi:.1f}
+MACD: {macd_val:.{dec}f} | Histogram: {macd_hist:.{dec}f}
+EMA20: {ema20:.{dec}f} | EMA50: {ema50:.{dec}f} | EMA200: {ema200:.{dec}f}
+Bollinger Upper: {bb_upper:.{dec}f} | Lower: {bb_lower:.{dec}f}
+H4 Trend: {h4_trend}
+
+CALCULATOR BACKUP (rule-based):
+Direction: {calc_direction} | Score: {calc_score}/100 | Grade: {calc_grade}
+SL: {sl_calc:.{dec}f} | TP1: {tp1_calc:.{dec}f} | TP2: {tp2_calc:.{dec}f}
+
+LAST 10 CANDLES:
+{last_10_bars_str}
+
+═══ YOUR TASK ═══
+Analyze ALL the above + your macro/news knowledge. Return ONLY valid JSON:
+{{
+  "ai_rating": <1-10 scale: 1=terrible, 5=neutral, 8=strong, 10=perfect setup>,
+  "direction": "BUY" or "SELL" or "WAIT",
+  "action": "STRONG BUY" or "BUY" or "WAIT" or "SELL" or "STRONG SELL",
+  "entry": <optimal entry price based on SMART ENTRY ENGINE levels>,
+  "entry_type": "MARKET" or "LIMIT" or "WAIT",
+  "sl": <stop loss price>,
+  "tp1": <take profit 1>,
+  "tp2": <take profit 2>,
+  "confidence": "HIGH" or "MEDIUM" or "LOW",
+  "reasoning": "<2-3 sentence analysis combining technicals + fundamentals>",
+  "key_factors": ["factor1", "factor2", "factor3"],
+  "news_impact": "<1 sentence on current news/macro affecting this pair>",
+  "agrees_with_calculator": true or false,
+  "risk_warning": "<1 sentence if any major risk>"
+}}
+
+RULES:
+- ai_rating 8+ = strong trade, 6-7 = decent, 5 = neutral, below 5 = avoid
+- If session is off-peak, reduce rating by 1-2 points
+- If major news event within 2h, add risk_warning
+- Be HONEST — if no clear setup, say WAIT. Don't force trades.
+- ENTRY MUST be at a technical level (EMA20, support/resistance, BB band), NOT just current price ± small offset
+- entry_type: MARKET = enter now (price at ideal level), LIMIT = set pending order at key level, WAIT = no good entry yet
+- If price is far from any key level, set entry_type to WAIT or LIMIT at the nearest key level
+- SL/TP must be realistic based on ATR. SL behind the key level, TP at next key level
+"""
+
+    raw = _grok([
+        {"role": "system", "content": (
+            "You are an elite institutional trader. Return ONLY valid JSON. "
+            "No markdown, no code blocks, no explanation outside JSON. "
+            "Be brutally honest — bad setups get low ratings."
+        )},
+        {"role": "user", "content": prompt}
+    ], max_tokens=400, temperature=0.2, api_key=xai_key)
+
+    if not raw or raw.startswith("[Grok"):
+        return {"ai_rating": 0, "direction": calc_direction, "action": "WAIT",
+                "reasoning": raw or "Grok error", "confidence": "LOW",
+                "key_factors": [], "error": True}
+
+    try:
+        cleaned = re.sub(r"```json|```", "", raw).strip()
+        result = json.loads(cleaned)
+        # Normalize direction
+        d = result.get("direction", "WAIT").upper()
+        result["direction"] = "Buy" if d in ("BUY","LONG") else ("Sell" if d in ("SELL","SHORT") else "Wait")
+        # Ensure numeric fields
+        result["ai_rating"] = max(1, min(10, int(result.get("ai_rating", 5))))
+        for k in ("entry", "sl", "tp1", "tp2"):
+            if k in result:
+                result[k] = float(result[k])
+            else:
+                result[k] = {"entry": close, "sl": sl_calc, "tp1": tp1_calc, "tp2": tp2_calc}[k]
+        # entry_type from Grok
+        if "entry_type" not in result or result.get("entry_type") not in ("MARKET","LIMIT","WAIT"):
+            result["entry_type"] = "MARKET"
+        result["error"] = False
+        # Add calculator comparison
+        result["calc_score"] = calc_score
+        result["calc_grade"] = calc_grade
+        result["calc_direction"] = calc_direction
+        return result
+    except Exception as e:
+        return {"ai_rating": 5, "direction": calc_direction, "action": "WAIT",
+                "reasoning": f"Parse error: {raw[:200]}", "confidence": "LOW",
+                "key_factors": [], "error": True,
+                "calc_score": calc_score, "calc_grade": calc_grade, "calc_direction": calc_direction}
+
+def get_ai_trade_advice(trade: dict, live_price: float, analysis: dict, news: dict) -> str:
+    """
+    Active trade advisor: asks Grok whether to HOLD, EXIT, or MOVE SL.
+    Returns a clear recommendation with reasoning.
+    """
+    key = get_xai_key()
+    if not key: return "⚠ No xAI key — add it in the sidebar."
+    sym    = trade.get("symbol","?")
+    dir_   = trade["direction"]
+    entry  = float(trade["entry"]); sl = float(trade["sl"])
+    tp1    = float(trade.get("tp1", entry)); tp2 = float(trade.get("tp2", entry))
+    risk   = abs(entry - sl)
+    move   = (live_price - entry) if dir_=="Buy" else (entry - live_price)
+    pnl_r  = round(move/risk, 2) if risk > 0 else 0
+    # Distance to SL and TP in pips
+    ps     = cfg(sym).get("pip", 0.0001)
+    sl_dist_pips  = round(abs(live_price - sl) / ps, 1)
+    tp1_dist_pips = round(abs(live_price - tp1) / ps, 1)
+    # Context from analysis
+    rsi       = fmt_num(analysis.get("rsi", 50), 1)
+    macd_hist = fmt_num(analysis.get("macd_hist", 0), 5)
+    h4_trend  = analysis.get("h4_trend","?")
+    session   = analysis.get("session","?")
+    n_info    = f"Risk={news['risk']}, bias={news['bias'].upper()}, {news['summary']}" if news and news.get("ok") else "no news data"
+    hist = get_historical_context(sym, dir_, min_trades=5)
+    msg = (
+        f"ACTIVE TRADE — HOLD / EXIT / MOVE SL?\n"
+        f"Symbol: {sym}  Direction: {dir_}\n"
+        f"Entry: {fmt_price(entry,sym)}  |  Current Price: {fmt_price(live_price,sym)}\n"
+        f"SL: {fmt_price(sl,sym)} ({sl_dist_pips} pips away)  |  TP1: {fmt_price(tp1,sym)} ({tp1_dist_pips} pips away)\n"
+        f"Current P&L: {pnl_r:+.2f}R\n"
+        f"RSI14: {rsi}  |  MACD Hist: {macd_hist}  |  H4 Trend: {h4_trend}\n"
+        f"Session: {session}  |  News: {n_info}"
+        f"{hist}\n\n"
+        f"Give a CLEAR recommendation:\n"
+        f"1. Action: HOLD / EXIT NOW / MOVE SL TO BREAKEVEN / PARTIAL EXIT\n"
+        f"2. Reason: 2-3 sentences why\n"
+        f"3. Risk: What is the main danger right now?\n"
+        f"Be direct and specific. Factor in the trader's personal history above if available."
+    )
+    return _grok([
+        {"role":"system","content":"You are a professional forex risk manager who uses the trader's personal performance history to give personalised advice. UTC: "
+         + pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M")},
+        {"role":"user","content":msg}
+    ], max_tokens=400, temperature=0.2, api_key=key) or "No response from Grok."
+
+# ============================================================
+# TRADING ECONOMICS — Real Economic Calendar
+# ============================================================
+# Currency → relevant TE country codes
+_TE_CURRENCY_MAP = {
+    "EUR": ["euro area","european union"],
+    "USD": ["united states"],
+    "GBP": ["united kingdom"],
+    "JPY": ["japan"],
+    "AUD": ["australia"],
+    "CHF": ["switzerland"],
+    "NZD": ["new zealand"],
+    "XAU": ["united states"],
+    "XTI": ["united states"],
+    "BTC": ["united states"],
+    "ETH": ["united states"],
+}
+# Symbol → currencies involved
+_TE_SYMBOL_CURRENCIES = {
+    "EURUSD": ["EUR","USD"], "GBPUSD": ["GBP","USD"],
+    "USDJPY": ["USD","JPY"], "XAUUSD": ["XAU","USD"],
+    "AUDUSD": ["AUD","USD"], "EURCHF": ["EUR","CHF"],
+    "NZDUSD": ["NZD","USD"], "GBPJPY": ["GBP","JPY"],
+    "EURJPY": ["EUR","JPY"], "XTIUSD": ["XTI","USD"],
+    "BTCUSD": ["BTC","USD"], "ETHUSD": ["ETH","USD"],
+}
+# High-impact event keywords
+_TE_HIGH_IMPACT = ["interest rate","cpi","nfp","non-farm","gdp","fomc","inflation",
+                   "employment","unemployment","pmi","retail sales","central bank"]
+
+@st.cache_data(ttl=3600)   # 1 hour cache — conserves 500 req/month limit
+def fetch_te_calendar(te_key: str):
+    """Fetch next 3 days of economic calendar from Trading Economics."""
+    if not te_key:
+        return []
+    try:
+        url = "https://api.tradingeconomics.com/calendar"
+        params = {"c": te_key, "f": "json"}
+        r = requests.get(url, params=params, timeout=15)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        if not isinstance(data, list):
+            return []
+        # Keep only events in next 3 days
+        now = pd.Timestamp.utcnow()
+        cutoff = now + pd.Timedelta(days=3)
+        events = []
+        for ev in data:
+            try:
+                dt = pd.Timestamp(ev.get("Date",""), tz="UTC")
+                if now - pd.Timedelta(hours=2) <= dt <= cutoff:
+                    events.append({
+                        "date": dt,
+                        "country": str(ev.get("Country","")).lower(),
+                        "event": str(ev.get("Event","")),
+                        "importance": str(ev.get("Importance","")).upper(),
+                        "actual": ev.get("Actual",""),
+                        "forecast": ev.get("Forecast",""),
+                        "previous": ev.get("Previous",""),
+                    })
+            except Exception:
+                continue
+        return sorted(events, key=lambda x: x["date"])
+    except Exception:
+        return []
+
+def get_te_news_for_symbol(symbol: str, te_key: str) -> dict:
+    """
+    Returns news dict compatible with get_news_sentiment() output,
+    but powered by real Trading Economics calendar data.
+    """
+    events = fetch_te_calendar(te_key)
+    sym = norm(symbol)
+    currencies = _TE_SYMBOL_CURRENCIES.get(sym, [])
+    relevant_countries = []
+    for c in currencies:
+        relevant_countries.extend(_TE_CURRENCY_MAP.get(c, []))
+
+    # Filter events relevant to this symbol
+    rel = []
+    for ev in events:
+        country_match = any(rc in ev["country"] for rc in relevant_countries)
+        if country_match:
+            rel.append(ev)
+
+    if not rel:
+        return {"risk":"LOW","adj":0,"bias":"neutral",
+                "summary":"No major events in next 3 days.",
+                "events":[],"ok":True,"source":"TE"}
+
+    # Determine risk level
+    now = pd.Timestamp.utcnow()
+    high_soon = [e for e in rel if e["importance"]=="HIGH"
+                 and (e["date"] - now).total_seconds() < 7200]  # within 2h
+    high_today = [e for e in rel if e["importance"]=="HIGH"]
+    medium_events = [e for e in rel if e["importance"]=="MEDIUM"]
+
+    if high_soon:
+        risk = "HIGH"; adj = -10
+    elif high_today:
+        risk = "HIGH"; adj = -5
+    elif medium_events:
+        risk = "MEDIUM"; adj = -3
+    else:
+        risk = "LOW"; adj = 0
+
+    # Build event list (max 4)
+    event_strs = []
+    for e in rel[:4]:
+        time_str = e["date"].strftime("%a %H:%M UTC")
+        imp_icon = "🔴" if e["importance"]=="HIGH" else ("🟡" if e["importance"]=="MEDIUM" else "⚪")
+        actual_str = f" → Actual: {e['actual']}" if e["actual"] not in ("","None",None) else ""
+        forecast_str = f" (Fcst: {e['forecast']})" if e["forecast"] not in ("","None",None) else ""
+        event_strs.append(f"{imp_icon} {time_str} [{e['country'].title()}] {e['event']}{forecast_str}{actual_str}")
+
+    # Summary
+    if high_soon:
+        summary = f"⚠ HIGH-RISK event within 2h: {high_soon[0]['event']}"
+    elif high_today:
+        summary = f"High-impact event today: {high_today[0]['event']}"
+    elif medium_events:
+        summary = f"{len(medium_events)} medium-impact events upcoming"
+    else:
+        summary = f"{len(rel)} low-impact events in next 3 days"
+
+    return {"risk":risk,"adj":adj,"bias":"neutral",
+            "summary":summary,"events":event_strs,"ok":True,"source":"TE"}
+
+# ============================================================
+# TWELVE DATA
+# ============================================================
+def _td_get(endpoint, params, _retries=2, _backoff=0.5):
+    """Fetch from Twelve Data with automatic retry on timeout / 5xx errors."""
+    import time
     key = get_td_key()
-    if not key: raise ValueError("No Twelve Data key — enter it in sidebar")
-    url = f"https://api.twelvedata.com/{endpoint}"
+    if not key: raise ValueError("No Twelve Data key")
     p = dict(params); p["apikey"] = key
-    r = requests.get(url, params=p, timeout=20); r.raise_for_status()
-    data = r.json()
-    if isinstance(data,dict) and data.get("status")=="error":
-        raise ValueError(data.get("message","Twelve Data error"))
-    return data
+    last_err = None
+    for attempt in range(_retries):
+        try:
+            r = requests.get(f"https://api.twelvedata.com/{endpoint}",
+                             params=p, timeout=25)
+            r.raise_for_status()
+            data = r.json()
+            if isinstance(data, dict) and data.get("status") == "error":
+                raise ValueError(data.get("message", "Twelve Data error"))
+            return data
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.HTTPError) as e:
+            last_err = e
+            if attempt < _retries - 1:
+                time.sleep(_backoff)   # fast retry: 0.5s only
+    raise last_err
 
-def parse_td(values:List[Dict]) -> pd.DataFrame:
+def _parse_td(values):
     df = pd.DataFrame(values)
     if df.empty: return df
     col = "datetime" if "datetime" in df.columns else "date"
@@ -405,1643 +1176,2780 @@ def parse_td(values:List[Dict]) -> pd.DataFrame:
     return df.sort_values("time").dropna(subset=["time","open","high","low","close"]).reset_index(drop=True)
 
 @st.cache_data(ttl=60)
-def fetch_bars(symbol:str, interval:str, bars:int, td_key:str) -> pd.DataFrame:
-    """V12: td_key in signature so cache invalidates when key changes."""
-    data = td_get("time_series", {"symbol":to_api_symbol(symbol),"interval":interval,
-                                  "outputsize":int(bars),"timezone":"UTC","order":"ASC"})
+def fetch_bars(symbol, interval, bars, td_key):
+    """Fetch OHLCV bars. Tries MetaApi first (if connected), falls back to Twelve Data."""
+    ma_tok = get_ma_token(); ma_acc = get_ma_account()
+    if ma_tok and ma_acc:
+        try:
+            df = fetch_bars_ma(symbol, interval, bars, ma_tok, ma_acc)
+            if df is not None and len(df) >= 50:
+                return df          # ✅ MetaApi success
+        except Exception:
+            pass                   # silent fallback to Twelve Data
+    # ── Twelve Data fallback ──────────────────────────────────
+    if not td_key:
+        raise ValueError("No data source: MetaApi not connected and no Twelve Data key")
+    data = _td_get("time_series", {"symbol":to_api_sym(symbol),"interval":interval,
+                                   "outputsize":int(bars),"timezone":"UTC","order":"ASC"})
     v = data.get("values",[])
-    if not v: raise ValueError("No bars returned from Twelve Data")
-    return parse_td(v)
+    if not v: raise ValueError(f"No bars from Twelve Data for {symbol}")
+    return _parse_td(v)
 
-def add_indicators(df:pd.DataFrame) -> pd.DataFrame:
+# ============================================================
+# INDICATORS
+# ============================================================
+def add_indicators(df):
     x = df.copy()
-    # EMAs
-    x["ema20"]  = x["close"].ewm(span=20,adjust=False).mean()
-    x["ema50"]  = x["close"].ewm(span=50,adjust=False).mean()
-    x["ema200"] = x["close"].ewm(span=200,adjust=False).mean()
-    # ATR
+    x["ema9"]   = x["close"].ewm(span=9,   adjust=False).mean()
+    x["ema21"]  = x["close"].ewm(span=21,  adjust=False).mean()
+    x["ema20"]  = x["close"].ewm(span=20,  adjust=False).mean()
+    x["ema50"]  = x["close"].ewm(span=50,  adjust=False).mean()
+    x["ema200"] = x["close"].ewm(span=200, adjust=False).mean()
     tr = pd.concat([x["high"]-x["low"],
                     (x["high"]-x["close"].shift()).abs(),
-                    (x["low"]-x["close"].shift()).abs()],axis=1).max(axis=1)
+                    (x["low"] -x["close"].shift()).abs()],axis=1).max(axis=1)
     x["atr14"] = tr.rolling(14).mean()
-    # RSI
-    delta=x["close"].diff(); gain=delta.clip(lower=0); loss=-delta.clip(upper=0)
+    delta = x["close"].diff()
+    gain = delta.clip(lower=0); loss = -delta.clip(upper=0)
     x["rsi14"] = 100-(100/(1+gain.rolling(14).mean()/loss.rolling(14).mean().replace(0,np.nan)))
-    # MACD (12,26,9)
     ema12 = x["close"].ewm(span=12,adjust=False).mean()
     ema26 = x["close"].ewm(span=26,adjust=False).mean()
     x["macd"]      = ema12 - ema26
     x["macd_sig"]  = x["macd"].ewm(span=9,adjust=False).mean()
     x["macd_hist"] = x["macd"] - x["macd_sig"]
-    # Bollinger Bands (20, 2σ)
-    x["bb_mid"]   = x["close"].rolling(20).mean()
-    bb_std        = x["close"].rolling(20).std()
-    x["bb_upper"] = x["bb_mid"] + 2*bb_std
-    x["bb_lower"] = x["bb_mid"] - 2*bb_std
-    x["bb_width"]  = (x["bb_upper"]-x["bb_lower"])/x["bb_mid"]
-    # Swing highs/lows
-    x["hh20"] = x["high"].rolling(20).max()
-    x["ll20"]  = x["low"].rolling(20).min()
-    x["slope20"] = x["ema20"].diff(5)
-    # Candle patterns
-    body  = (x["close"]-x["open"]).abs()
-    upper = x["high"] - x[["close","open"]].max(axis=1)
-    lower = x[["close","open"]].min(axis=1) - x["low"]
-    x["pin_bull"] = (lower > 2*body) & (upper < 0.3*body)   # bullish pin bar
-    x["pin_bear"] = (upper > 2*body) & (lower < 0.3*body)   # bearish pin bar
-    x["engulf_bull"] = (x["close"]>x["open"]) & (x["close"].shift()<=x["open"].shift()) & \
-                       (x["close"]>x["open"].shift()) & (x["open"]<x["close"].shift())
-    x["engulf_bear"] = (x["close"]<x["open"]) & (x["close"].shift()>=x["open"].shift()) & \
-                       (x["close"]<x["open"].shift()) & (x["open"]>x["close"].shift())
+    x["bb_mid"]    = x["close"].rolling(20).mean()
+    bb_std = x["close"].rolling(20).std()
+    x["bb_upper"]  = x["bb_mid"] + 2*bb_std
+    x["bb_lower"]  = x["bb_mid"] - 2*bb_std
     return x
 
-def trend_bias(df:pd.DataFrame)->str:
-    r=df.iloc[-1]
-    if r["ema20"]>r["ema50"]>r["ema200"] and r["macd_hist"]>0: return "bull"
-    if r["ema20"]<r["ema50"]<r["ema200"] and r["macd_hist"]<0: return "bear"
-    if r["ema20"]>r["ema50"]>r["ema200"]: return "bull_weak"
-    if r["ema20"]<r["ema50"]<r["ema200"]: return "bear_weak"
+# ============================================================
+# SIGNAL ENGINE  — H4-first, ATR-based SL/TP
+# ============================================================
+def _h4_trend(df_h4):
+    """Returns 'bull' | 'bear' | 'neutral' based on H4 EMAs."""
+    if df_h4 is None or len(df_h4) < 50: return "neutral"
+    r = df_h4.iloc[-1]
+    e20 = r.get("ema20", r["close"]); e50 = r.get("ema50", r["close"])
+    e200= r.get("ema200",r["close"]); close = r["close"]
+    if close > e50 and e50 > e200 and e20 > e50: return "bull"
+    if close < e50 and e50 < e200 and e20 < e50: return "bear"
+    if close > e200: return "bull_weak"
+    if close < e200: return "bear_weak"
     return "neutral"
 
-def detect_sweep(df:pd.DataFrame,symbol:str)->Dict:
-    if len(df)<8: return {"detected":False,"severity":"LOW","desc":"Insufficient data"}
-    row=df.iloc[-1]; prev=df.iloc[-6:-1]
-    atr=row.get("atr14")
-    if pd.isna(atr) or atr<=0: return {"detected":False,"severity":"LOW","desc":"ATR unavailable"}
-    rh=prev["high"].max(); rl=prev["low"].min()
-    if row["high"]>rh and row["close"]<rh:
-        sev="HIGH" if (row["high"]-rh)/atr>1.2 else "MEDIUM"
-        return {"detected":True,"severity":sev,"desc":f"Upper sweep {fmt_price(rh,symbol)} — avoid longs"}
-    if row["low"]<rl and row["close"]>rl:
-        sev="HIGH" if (rl-row["low"])/atr>1.2 else "MEDIUM"
-        return {"detected":True,"severity":sev,"desc":f"Lower sweep {fmt_price(rl,symbol)} — avoid shorts"}
-    return {"detected":False,"severity":"LOW","desc":"No sweep"}
+def _candle_score(df, direction):
+    """Score candle pattern: 0-10. Engulfing, pin bars, momentum candles."""
+    if len(df) < 3: return 0
+    c = df.iloc[-1]; p = df.iloc[-2]
+    body  = abs(float(c["close"])-float(c["open"]))
+    range_= float(c["high"])-float(c["low"])
+    if range_ == 0: return 0
+    body_ratio = body / range_
+    upper_wick = float(c["high"]) - max(float(c["close"]), float(c["open"]))
+    lower_wick = min(float(c["close"]), float(c["open"])) - float(c["low"])
 
-# ============================================================
-# PLAN DATACLASS
-# ============================================================
-@dataclass
-class Plan:
-    symbol:str; regime:str="insufficient"; strategy:str="No Strategy"
-    direction:str="Wait"; execution_status:str="Wait"
-    setup_score:int=20; setup_grade:str="D"
-    entry:Optional[float]=None; sl:Optional[float]=None
-    tp1:Optional[float]=None; tp2:Optional[float]=None; tp3:Optional[float]=None
-    rr:Optional[float]=None; reason:str="No valid setup"
-    entry_reasons:List[str]=field(default_factory=list)
-    exit_conditions:List[str]=field(default_factory=list)
-    score_breakdown:Dict[str,int]=field(default_factory=dict)  # V12: per-component scores
-    confluence_count:int=0        # V12: how many conditions confirmed
-    confluence_needed:int=3       # V12: min confirmations for Ready
-    session_label:str=""          # V12: session name
-    session_score:int=0           # V12: session bonus
-    mtf_aligned:bool=False        # V12: higher TF agrees
-    base_lot:float=0.0; suggested_lot:float=0.0
-    news_adj:int=0; news_risk:str="LOW"; news_bias:str="neutral"
-    news_summary:str=""; news_events:List[str]=field(default_factory=list)
-    news_ok:bool=False; final_score:int=20; final_grade:str="D"
-    def to_dict(self): return self.__dict__.copy()
+    if direction == "Buy":
+        # Bullish engulfing
+        if float(c["close"]) > float(c["open"]) and float(c["close"]) > float(p["open"]) and float(c["open"]) < float(p["close"]): return 10
+        # Bullish pin bar (hammer): long lower wick, small upper wick
+        if lower_wick > body * 2 and upper_wick < body * 0.5 and body > 0: return 10
+        # Strong bullish candle
+        if float(c["close"]) > float(c["open"]) and body_ratio > 0.65: return 5
+        # Morning star (3-candle reversal)
+        if len(df) >= 4:
+            pp = df.iloc[-3]
+            if float(pp["close"]) < float(pp["open"]) and body_ratio > 0.5 and float(c["close"]) > float(c["open"]):
+                pp_body = abs(float(pp["close"]) - float(pp["open"]))
+                p_body = abs(float(p["close"]) - float(p["open"]))
+                if p_body < pp_body * 0.3: return 8
+    else:
+        # Bearish engulfing
+        if float(c["close"]) < float(c["open"]) and float(c["close"]) < float(p["open"]) and float(c["open"]) > float(p["close"]): return 10
+        # Bearish pin bar (shooting star): long upper wick
+        if upper_wick > body * 2 and lower_wick < body * 0.5 and body > 0: return 10
+        # Strong bearish candle
+        if float(c["close"]) < float(c["open"]) and body_ratio > 0.65: return 5
+        # Evening star
+        if len(df) >= 4:
+            pp = df.iloc[-3]
+            if float(pp["close"]) > float(pp["open"]) and body_ratio > 0.5 and float(c["close"]) < float(c["open"]):
+                pp_body = abs(float(pp["close"]) - float(pp["open"]))
+                p_body = abs(float(p["close"]) - float(p["open"]))
+                if p_body < pp_body * 0.3: return 8
+    return 0
 
-# ============================================================
-# SCORING ENGINE  (V12: explicit breakdown, confluence gate)
-# ============================================================
-def _score_plan(row:pd.Series, prev_row:pd.Series, df:pd.DataFrame,
-                direction:str, rr:float, symbol:str) -> Tuple[int, Dict[str,int], int, int]:
+def score_signal(df, df_h4, symbol, direction):
     """
-    Returns (total_score, breakdown_dict, confluence_count, session_pts).
-    Max 100 pts:
-      EMA stack   20 — trend structure
-      Pullback    15 — price returning to ema20
-      MACD        15 — histogram confirms direction
-      RSI         10 — not overbought/oversold against trade
-      Candle      10 — pin bar or engulfing pattern
-      RR          20 — risk:reward quality
-      Session     10 — trading in optimal session
-    Confluence = number of non-zero components (6 possible).
+    H4-first scoring (0-100).
+    Returns (score, breakdown_dict, grade, warning_list)
     """
-    bd: Dict[str,int] = {}
-    # 1. EMA stack
-    if direction=="Buy":
-        bd["EMA Stack"] = 20 if row["ema20"]>row["ema50"]>row["ema200"] else \
-                           10 if row["ema20"]>row["ema50"] else 0
+    c = cfg(symbol)
+    row   = df.iloc[-1]
+    prev  = df.iloc[-2] if len(df) >= 2 else row
+    close = float(row["close"])
+    e20   = float(row.get("ema20",  close))
+    e50   = float(row.get("ema50",  close))
+    e200  = float(row.get("ema200", close))
+    atr   = float(row.get("atr14",  0.001) or 0.001)
+    rsi   = float(row.get("rsi14",  50)    or 50)
+    mh    = float(row.get("macd_hist", 0)  or 0)
+    mh_p  = float(prev.get("macd_hist",0)  or 0)
+    bd    = {}; score = 0; warns = []
+
+    # 1. H4 Trend (25 pts) — HARD GATE
+    h4t = _h4_trend(df_h4)
+    h4_aligned = (direction=="Buy"  and h4t in ("bull","bull_weak")) or \
+                 (direction=="Sell" and h4t in ("bear","bear_weak"))
+    h4_opposed = (direction=="Buy"  and h4t in ("bear","bear_weak")) or \
+                 (direction=="Sell" and h4t in ("bull","bull_weak"))
+    if h4_aligned:          h4_pts = 25
+    elif h4t == "neutral":  h4_pts = 10; warns.append("⚠ H4 neutral — no clear trend")
+    else:                   h4_pts = 0;  warns.append("🚫 H4 OPPOSES this trade — high-risk")
+    score += h4_pts; bd["H4 Trend"] = h4_pts
+
+    # 2. EMA Stack (20 pts)
+    if direction == "Buy":
+        ep = (10 if e20>e50 else 0) + (10 if e50>e200 else 0)
     else:
-        bd["EMA Stack"] = 20 if row["ema20"]<row["ema50"]<row["ema200"] else \
-                           10 if row["ema20"]<row["ema50"] else 0
-    # 2. Pullback quality (distance from EMA20)
-    dist = abs(row["close"]-row["ema20"])/max(row["atr14"],1e-9)
-    bd["Pullback"] = 15 if dist<=0.4 else 10 if dist<=0.7 else 5 if dist<=1.0 else 0
-    # 3. MACD histogram
-    if direction=="Buy":
-        bd["MACD"] = 15 if row["macd_hist"]>0 and row["macd_hist"]>prev_row["macd_hist"] else \
-                      8 if row["macd_hist"]>0 else 0
+        ep = (10 if e20<e50 else 0) + (10 if e50<e200 else 0)
+    score += ep; bd["EMA Stack"] = ep
+
+    # 3. Pullback to EMA (15 pts) — improved: check if price is pulling back TO ema, not away
+    margin = atr * 0.8
+    # Best: close near EMA20 AND coming from the right direction (pullback, not breakdown)
+    near_e20 = abs(close - e20) <= margin
+    near_e50 = abs(close - e50) <= margin * 1.5
+    # Check if previous bar was further from EMA (confirming pullback approach)
+    prev_close = float(prev["close"])
+    approaching_e20 = abs(prev_close - e20) > abs(close - e20)
+    if near_e20 and approaching_e20:     pb = 15  # Perfect pullback to EMA20
+    elif near_e20:                        pb = 10  # Near EMA20 but not clearly pulling back
+    elif near_e50 and abs(prev_close - e50) > abs(close - e50): pb = 8
+    elif near_e50:                        pb = 5
+    else:                                 pb = 0
+    score += pb; bd["Pullback"] = pb
+
+    # 4. MACD momentum (15 pts) — enhanced with cross detection
+    macd_val = float(row.get("macd", 0) or 0)
+    macd_sig = float(row.get("macd_sig", 0) or 0)
+    macd_cross_bull = macd_val > macd_sig and float(prev.get("macd", 0) or 0) <= float(prev.get("macd_sig", 0) or 0)
+    macd_cross_bear = macd_val < macd_sig and float(prev.get("macd", 0) or 0) >= float(prev.get("macd_sig", 0) or 0)
+    if direction == "Buy":
+        if macd_cross_bull: mp = 15  # Fresh bullish MACD cross = full points
+        elif mh > 0 and mh > mh_p: mp = 12
+        elif mh > mh_p: mp = 6
+        else: mp = 0
     else:
-        bd["MACD"] = 15 if row["macd_hist"]<0 and row["macd_hist"]<prev_row["macd_hist"] else \
-                      8 if row["macd_hist"]<0 else 0
-    # 4. RSI (avoid overbought longs / oversold shorts)
-    rsi = row["rsi14"]
-    if direction=="Buy":
-        bd["RSI"] = 10 if 40<=rsi<=60 else 5 if 30<=rsi<=70 else 0
+        if macd_cross_bear: mp = 15  # Fresh bearish MACD cross
+        elif mh < 0 and mh < mh_p: mp = 12
+        elif mh < mh_p: mp = 6
+        else: mp = 0
+    score += mp; bd["MACD"] = mp
+
+    # 5. RSI zone (10 pts) — asset-class adjusted
+    ac = c.get("asset_class", "forex")
+    if ac in ("gold", "oil", "crypto"):
+        # Wider RSI zones for volatile assets
+        rsi_buy_range  = (25, 68)
+        rsi_sell_range = (32, 75)
+        rsi_ob = 78; rsi_os = 22
     else:
-        bd["RSI"] = 10 if 40<=rsi<=60 else 5 if 30<=rsi<=70 else 0
-    # 5. Candle pattern
-    candle = 0
-    if direction=="Buy"  and (row.get("pin_bull",False) or row.get("engulf_bull",False)): candle=10
-    if direction=="Sell" and (row.get("pin_bear",False) or row.get("engulf_bear",False)): candle=10
-    bd["Candle"] = candle
-    # 6. R:R
-    bd["R:R"] = 20 if rr>=2.5 else 15 if rr>=2.0 else 10 if rr>=1.5 else 5 if rr>=1.2 else 0
-    # 7. Session (caller adds this)
-    sess_pts,_ = session_score(symbol, row.get("time", pd.Timestamp.utcnow()))
-    bd["Session"] = sess_pts
-    total = sum(bd.values())
-    confluence = sum(1 for k,v in bd.items() if k!="Session" and v>0)
-    return min(total,100), bd, confluence, sess_pts
-
-# ============================================================
-# REGIME
-# ============================================================
-def get_regime(df:pd.DataFrame)->str:
-    if len(df)<220: return "insufficient"
-    r=df.iloc[-1]
-    if pd.isna(r["atr14"]) or r["atr14"]<=0: return "insufficient"
-    # V12: require MACD confirmation for trend
-    if r["ema20"]>r["ema50"]>r["ema200"] and r["slope20"]>0: return "trend_up"
-    if r["ema20"]<r["ema50"]<r["ema200"] and r["slope20"]<0: return "trend_down"
-    if r["bb_width"]<0.005: return "squeeze"  # low volatility squeeze
-    if 40<=r["rsi14"]<=60: return "range"
-    return "mean_revert"
-
-def _empty(symbol,regime,reason="No valid setup"):
-    return Plan(symbol=symbol,regime=regime,reason=reason,entry_reasons=[reason])
-
-# ============================================================
-# PLAN BUILDERS  (V12: MTF + scoring engine + session filter)
-# ============================================================
-def _get_htf_bias(symbol:str, td_key:str) -> str:
-    """Fetch 1h bars and return trend bias for MTF confirmation."""
-    try:
-        df1h = add_indicators(fetch_bars(symbol,"1h",260,td_key))
-        return trend_bias(df1h)
-    except:
-        return "neutral"
-
-def _trend_plan(df:pd.DataFrame, symbol:str, regime:str, htf_bias:str) -> Plan:
-    row=df.iloc[-1]; prev=df.iloc[-2]; atr=row["atr14"]; close=row["close"]; ema20=row["ema20"]
-    p=_empty(symbol,regime,"Trend exists but no valid trigger")
-    if pd.isna(atr) or atr<=0: return p
-    direction = "Buy" if regime=="trend_up" else "Sell"
-
-    # V12: MTF filter — 1h must agree
-    mtf_ok = (htf_bias in ("bull","bull_weak") and direction=="Buy") or \
-              (htf_bias in ("bear","bear_weak") and direction=="Sell") or \
-              htf_bias=="neutral"
-    if not mtf_ok:
-        p.reason=f"1H bias ({htf_bias}) opposes {direction} — MTF conflict"
-        p.entry_reasons=[p.reason,"Wait for higher timeframe to align."]
-        return p
-
-    dist = abs(close-ema20)/atr
-    if dist>1.0:
-        p.reason=f"Too extended ({dist:.2f} ATR from EMA20 — max 1.0)"
-        p.entry_reasons=[p.reason,"Wait for pullback to EMA20 before entering."]; return p
-
-    touched_pb = dist<=0.75
-    resumed    = (close>prev["high"]) if direction=="Buy" else (close<prev["low"])
-    if not (touched_pb or resumed):
-        p.entry_reasons=[p.reason]; return p
-
-    if direction=="Buy":
-        entry=float(close); sl=float(min(df.tail(6)["low"].min(), ema20-0.5*atr))
-        risk=entry-sl; tp1=float(entry+risk); tp2=float(entry+2.0*risk); tp3=float(entry+3.0*risk)
+        rsi_buy_range  = (30, 60)
+        rsi_sell_range = (40, 70)
+        rsi_ob = 70; rsi_os = 30
+    if direction == "Buy":
+        rp = 10 if rsi_buy_range[0]<=rsi<=rsi_buy_range[1] else (8 if rsi<rsi_buy_range[0] else 0)
+        if rsi > rsi_ob: warns.append(f"⚠ RSI {rsi:.0f} overbought — avoid Buy")
     else:
-        entry=float(close); sl=float(max(df.tail(6)["high"].max(), ema20+0.5*atr))
-        risk=sl-entry; tp1=float(entry-risk); tp2=float(entry-2.0*risk); tp3=float(entry-3.0*risk)
-    rr = abs(tp2-entry)/max(abs(entry-sl),1e-9)
+        rp = 10 if rsi_sell_range[0]<=rsi<=rsi_sell_range[1] else (8 if rsi>rsi_sell_range[1] else 0)
+        if rsi < rsi_os: warns.append(f"⚠ RSI {rsi:.0f} oversold — avoid Sell")
+    score += rp; bd["RSI"] = rp
 
-    score, breakdown, confluence, sess_pts = _score_plan(row,prev,df,direction,rr,symbol)
-    sess_pts2, sess_name = session_score(symbol, row.get("time",pd.Timestamp.utcnow()))
-    ready = (score>=70 and rr>=1.5 and confluence>=3)
-    p2=Plan(symbol=symbol,regime=regime,strategy="Trend Continuation",direction=direction,
-            execution_status="Ready to Enter" if ready else "Wait",
-            setup_score=score,setup_grade=score_to_grade(score),
-            entry=entry,sl=sl,tp1=tp1,tp2=tp2,tp3=tp3,rr=float(rr),
-            score_breakdown=breakdown,confluence_count=confluence,confluence_needed=3,
-            session_label=sess_name,session_score=sess_pts2,mtf_aligned=mtf_ok,
-            reason=f"{regime} continuation")
-    p2.entry_reasons=[
-        f"EMA stack: {'✓' if breakdown['EMA Stack']==20 else '⚠'} ({breakdown['EMA Stack']}/20 pts)",
-        f"MACD histogram: {'✓ confirms' if breakdown['MACD']>=10 else '⚠ weak'} ({breakdown['MACD']}/15 pts)",
-        f"RSI14={fmt_num(row['rsi14'],1)} ({breakdown['RSI']}/10 pts)",
-        f"Candle pattern: {'✓ pin/engulf' if breakdown['Candle']==10 else '✗ none'} ({breakdown['Candle']}/10 pts)",
-        f"Pullback dist={dist:.2f} ATR ({breakdown['Pullback']}/15 pts)",
-        f"R:R={rr:.2f} ({breakdown['R:R']}/20 pts) | Session: {sess_name} ({sess_pts2}/10 pts)",
-        f"1H bias: {htf_bias} | MTF aligned: {'✓' if mtf_ok else '✗'}",
-        f"Confluence: {confluence}/6 conditions met (need ≥3)",
-    ]
-    p2.exit_conditions=[
-        f"TP1 {fmt_price(tp1,symbol)} — close 50%, move SL to breakeven",
-        f"TP2 {fmt_price(tp2,symbol)} — close 40%",
-        f"TP3 {fmt_price(tp3,symbol)} — let 10% run",
-        f"SL {fmt_price(sl,symbol)} — exit without hesitation",
-        "Close early if price breaks EMA50 against direction",
-    ]
-    return p2
+    # 6. Candle (10 pts)
+    cp = _candle_score(df, direction)
+    score += cp; bd["Candle"] = cp
 
-def _mean_rev_plan(df:pd.DataFrame, symbol:str, regime:str) -> Plan:
-    row=df.iloc[-1]; prev=df.iloc[-2]; atr=row["atr14"]
-    if pd.isna(atr) or atr<=0: return _empty(symbol,regime,"ATR unavailable")
-    close=row["close"]; ema20=row["ema20"]; dev=(close-ema20)/atr
-    if abs(dev)<1.3: return _empty(symbol,regime,f"Deviation {dev:.2f} ATR too small (need ≥1.3)")
-    # V12: require BB touch for better confirmation
-    bb_touch = (close<=row["bb_lower"] and dev<0) or (close>=row["bb_upper"] and dev>0)
-    direction = "Sell" if dev>0 else "Buy"
-    entry=float(close)
-    if direction=="Buy":
-        sl=float(close-0.85*atr); tp1=float(ema20); tp2=float(close+1.7*atr)
+    # 7. Session (5 pts) — crypto always active
+    if c.get("asset_class") == "crypto":
+        sp = 5; sess_ok_ = True; sess_name_ = get_session_now()
     else:
-        sl=float(close+0.85*atr); tp1=float(ema20); tp2=float(close-1.7*atr)
-    rr = abs(tp2-entry)/max(abs(entry-sl),1e-9)
-    score, breakdown, confluence, sess_pts = _score_plan(row,prev,df,direction,rr,symbol)
-    # Mean reversion base bonus
-    base = min(20, int(abs(dev)*8))
-    if bb_touch: base += 10
-    score = min(100, score+base)
-    sess_pts2, sess_name = session_score(symbol, row.get("time",pd.Timestamp.utcnow()))
-    ready = (score>=65 and rr>=1.3 and confluence>=2)
-    p=Plan(symbol=symbol,regime=regime,strategy="Mean Reversion",direction=direction,
-           execution_status="Ready to Enter" if ready else "Wait",
-           setup_score=score,setup_grade=score_to_grade(score),
-           entry=entry,sl=sl,tp1=tp1,tp2=tp2,rr=float(rr),
-           score_breakdown=breakdown,confluence_count=confluence,confluence_needed=2,
-           session_label=sess_name,session_score=sess_pts2,mtf_aligned=True,
-           reason=f"Deviation {dev:.2f} ATR from EMA20{' + BB touch' if bb_touch else ''}")
-    p.entry_reasons=[
-        f"Price {abs(dev):.2f} ATR {'above' if dev>0 else 'below'} EMA20 (extreme stretch)",
-        f"Bollinger Band {'touch ✓' if bb_touch else 'not touched (weaker signal)'}",
-        f"RSI={fmt_num(row['rsi14'],1)} ({'overbought' if dev>0 else 'oversold'})",
-        f"MACD: {breakdown['MACD']}/15 pts | Candle: {breakdown['Candle']}/10 pts",
-        "Counter-trend — use 50% normal lot size",
-    ]
-    p.exit_conditions=[
-        f"TP1 {fmt_price(tp1,symbol)} — EMA20 reversion (main target)",
-        f"TP2 {fmt_price(tp2,symbol)} — extended move",
-        f"SL {fmt_price(sl,symbol)} — deviation continues",
-    ]
-    return p
+        sess_ok_, sess_name_ = session_ok(symbol)
+        sp = 5 if sess_ok_ else 0
+        if not sess_ok_: warns.append(f"⚠ Off-peak session ({sess_name_}) — reduced signal quality")
+    score += sp; bd["Session"] = sp
 
-def _squeeze_plan(df:pd.DataFrame, symbol:str) -> Plan:
-    """V12: New — trade Bollinger Squeeze breakouts."""
-    row=df.iloc[-1]; prev=df.iloc[-2]; atr=row["atr14"]
-    if pd.isna(atr) or atr<=0: return _empty(symbol,"squeeze","ATR unavailable")
-    # Breakout direction from squeeze
-    direction = "Buy" if row["close"]>row["bb_upper"] and row["macd_hist"]>0 else \
-                "Sell" if row["close"]<row["bb_lower"] and row["macd_hist"]<0 else None
-    if direction is None: return _empty(symbol,"squeeze","Squeeze present — waiting for breakout direction")
-    entry=float(row["close"])
-    if direction=="Buy":
-        sl=float(row["bb_mid"]-0.5*atr); tp1=float(entry+atr); tp2=float(entry+2*atr)
-    else:
-        sl=float(row["bb_mid"]+0.5*atr); tp1=float(entry-atr); tp2=float(entry-2*atr)
-    rr=abs(tp2-entry)/max(abs(entry-sl),1e-9)
-    score, breakdown, confluence, _ = _score_plan(row,prev,df,direction,rr,symbol)
-    score = min(100, score+15)  # bonus for squeeze breakout
-    sess_pts2, sess_name = session_score(symbol, row.get("time",pd.Timestamp.utcnow()))
-    ready = (score>=65 and rr>=1.3)
-    p=Plan(symbol=symbol,regime="squeeze",strategy="BB Squeeze Breakout",direction=direction,
-           execution_status="Ready to Enter" if ready else "Wait",
-           setup_score=score,setup_grade=score_to_grade(score),
-           entry=entry,sl=sl,tp1=tp1,tp2=tp2,rr=float(rr),
-           score_breakdown=breakdown,confluence_count=confluence,confluence_needed=2,
-           session_label=sess_name,session_score=sess_pts2,mtf_aligned=True,
-           reason="BB Squeeze breakout")
-    p.entry_reasons=[
-        f"Bollinger Squeeze breakout {direction} — low volatility expansion signal",
-        f"MACD confirms direction: {breakdown['MACD']}/15 pts",
-        f"BB Width was compressed, now expanding",
-    ]
-    p.exit_conditions=[
-        f"TP1 {fmt_price(tp1,symbol)} — 1 ATR target",
-        f"TP2 {fmt_price(tp2,symbol)} — 2 ATR target",
-        f"SL {fmt_price(sl,symbol)} — back inside BB mid",
-    ]
-    return p
+    # 8. Volatility quality check — penalize choppy or chaotic markets
+    if len(df) >= 20:
+        atr_arr = df["atr14"].dropna().tail(20)
+        if len(atr_arr) >= 10:
+            atr_mean = float(atr_arr.mean())
+            atr_std = float(atr_arr.std())
+            # If ATR is very unstable (high std relative to mean), market is chaotic
+            if atr_mean > 0 and atr_std / atr_mean > 0.4:
+                score -= 5
+                warns.append("⚠ Volatile/choppy market — ATR unstable")
 
-def _xau_plan(df5:pd.DataFrame, df15:pd.DataFrame, df1h:pd.DataFrame, symbol:str) -> Plan:
-    row=df5.iloc[-1]; prev=df5.iloc[-2]; atr=row["atr14"]
-    p=_empty(symbol,"gold_scalp","No valid XAU trigger")
-    if pd.isna(atr) or atr<=0: return p
-    b5=trend_bias(df5); b15=trend_bias(df15); b1h=trend_bias(df1h)
-    aligned_bull = b5 in ("bull","bull_weak") and b15 in ("bull","bull_weak") and b1h in ("bull","bull_weak")
-    aligned_bear = b5 in ("bear","bear_weak") and b15 in ("bear","bear_weak") and b1h in ("bear","bear_weak")
-    dist=abs(row["close"]-row["ema20"])/atr; too_ext=dist>0.9
-    last3=df5.tail(3); vert=(last3["close"]-last3["open"]).abs().sum()>atr*1.8
-    rh=df5.iloc[-6:-1]["high"].max(); rl=df5.iloc[-6:-1]["low"].min()
-    bull_sw=row["low"]<rl and row["close"]>rl; bear_sw=row["high"]>rh and row["close"]<rh
-    long_t=aligned_bull and not too_ext and not vert and (
-        (row["close"]>row["ema20"] and prev["close"]<=prev["ema20"]) or bull_sw)
-    short_t=aligned_bear and not too_ext and not vert and (
-        (row["close"]<row["ema20"] and prev["close"]>=prev["ema20"]) or bear_sw)
-    if not is_xau_session_ok(row["time"]):
-        p.reason="XAU session filter: only trade 07-16 & 12-21 UTC"
-        p.entry_reasons=[p.reason]; return p
-    if not long_t and not short_t:
-        p.entry_reasons=[f"5m={b5} 15m={b15} 1h={b1h} — need all aligned",
-                         "Wait for MTF alignment + trigger."]; return p
-    tp_pts=20.0
-    if long_t:
-        entry=float(row["close"]); sl=float(min(df5.tail(8)["low"].min(),entry-0.8*atr))
-        tp1=float(entry+tp_pts); tp2=float(entry+35.0); risk=entry-sl
-        rr=(tp1-entry)/max(risk,1e-9); direction="Buy"; tag="Reclaim/lower-sweep long"
-    else:
-        entry=float(row["close"]); sl=float(max(df5.tail(8)["high"].max(),entry+0.8*atr))
-        tp1=float(entry-tp_pts); tp2=float(entry-35.0); risk=sl-entry
-        rr=(entry-tp1)/max(risk,1e-9); direction="Sell"; tag="Rejection/upper-sweep short"
-    if rr<1.2:
-        p.reason="TP20pts doesn't justify stop size"; p.entry_reasons=[p.reason]; return p
-    score, breakdown, confluence, _ = _score_plan(row,prev,df5,direction,rr,symbol)
-    mtf_bonus = 20 if (aligned_bull or aligned_bear) else 0
-    sw_bonus  = 15 if (bull_sw or bear_sw) else 0
-    score = min(100, score+mtf_bonus+sw_bonus)
-    sess_pts2,sess_name=session_score(symbol,row.get("time",pd.Timestamp.utcnow()))
-    p2=Plan(symbol=symbol,regime="gold_scalp",strategy="XAU 20pt Scalp",direction=direction,
-            execution_status="Ready to Enter" if score>=75 else "Wait",
-            setup_score=score,setup_grade=score_to_grade(score),
-            entry=entry,sl=sl,tp1=tp1,tp2=tp2,rr=float(rr),
-            score_breakdown=breakdown,confluence_count=confluence,confluence_needed=3,
-            session_label=sess_name,session_score=sess_pts2,mtf_aligned=True,
-            reason="XAU scalp — MTF aligned")
-    p2.entry_reasons=[f"MTF: 5m={b5} 15m={b15} 1h={b1h} ({'✓ ALIGNED' if aligned_bull or aligned_bear else '✗'})",
-                      f"Setup: {tag}",f"Sweep: {'✓' if bull_sw or bear_sw else '✗'} | TP={tp_pts:.0f}pts fixed"]
-    p2.exit_conditions=[f"TP1 {fmt_price(tp1,symbol)}: exit 70%",f"TP2 {fmt_price(tp2,symbol)}: runner",
-                        f"SL {fmt_price(sl,symbol)}: hard exit","Stalls 10 bars → manual exit"]
-    return p2
+    score = min(100, max(0, score))
 
-def select_plan(symbol:str, interval:str, bars:int, td_key:str) -> Tuple[pd.DataFrame,Plan]:
-    s=norm(symbol)
-    if s=="XAUUSD":
-        df5=add_indicators(fetch_bars(s,"5min",max(260,bars),td_key))
-        df15=add_indicators(fetch_bars(s,"15min",max(260,bars),td_key))
-        df1h=add_indicators(fetch_bars(s,"1h",max(260,bars),td_key))
-        return df5,_xau_plan(df5,df15,df1h,s)
-    df=add_indicators(fetch_bars(s,interval,bars,td_key))
-    regime=get_regime(df)
-    if regime=="insufficient": return df,_empty(s,regime,"Need ≥220 bars")
-    # V12: get HTF bias for MTF filter
-    htf_bias = _get_htf_bias(s, td_key) if interval not in ("1h","4h") else "neutral"
-    if regime in("trend_up","trend_down"): return df,_trend_plan(df,s,regime,htf_bias)
-    if regime=="squeeze": return df,_squeeze_plan(df,s)
-    return df,_mean_rev_plan(df,s,regime)
+    # Grade — symbol-specific thresholds, H4 alignment required for A/A+
+    if   score >= c["grade_aplus"] and h4_pts >= 20: grade = "A+"
+    elif score >= c["grade_a"]     and h4_pts >= 10: grade = "A"
+    elif score >= c["grade_b"]:                       grade = "B"
+    elif score >= 45:                                 grade = "C"
+    else:                                             grade = "D"
 
-def finalize_plan(plan:Plan, balance:float, risk_pct:float) -> Plan:
-    # Lot sizing
-    risk_amount=balance*(risk_pct/100)
-    if plan.entry and plan.sl:
-        stop_pips=abs(plan.entry-plan.sl)/max(pip_size(plan.symbol),1e-9)
-        plan.base_lot=max(0.0,round(risk_amount/(stop_pips*pip_value(plan.symbol)),3)) if stop_pips>0 else 0.0
-    plan.suggested_lot=plan.base_lot
-    # Grok news
-    xai=get_xai_key()
-    news=get_news_sentiment(plan.symbol,xai)
-    plan.news_adj=news["adj"]; plan.news_risk=news["risk"]; plan.news_bias=news["bias"]
-    plan.news_summary=news["summary"]; plan.news_events=news.get("events",[]); plan.news_ok=news.get("ok",False)
-    plan.final_score=int(max(0,min(100,plan.setup_score+plan.news_adj)))
-    plan.final_grade=score_to_grade(plan.final_score)
-    if plan.news_risk=="HIGH" and plan.execution_status=="Ready to Enter":
-        plan.execution_status="HIGH NEWS RISK — Wait"
-    return plan
+    return score, bd, grade, warns
 
-# ============================================================
-# LIVE HEALTH
-# ============================================================
-def compute_live_health(entry:float,sl:float,direction:str,df:pd.DataFrame,
-                        mt5_price:Optional[float]=None)->Dict:
+def _gold_structure_check(df, direction):
     """
-    mt5_price: if provided, use this (actual broker price) instead of Twelve Data close.
+    Check market structure for gold: Higher-Highs/Higher-Lows for Buy,
+    Lower-Highs/Lower-Lows for Sell. Uses last 30 bars.
+    Returns True if structure supports direction.
     """
-    if mt5_price and mt5_price > 0:
-        close = mt5_price
-        price_src = "MT5"
+    if len(df) < 30:
+        return False
+    recent = df.tail(30)
+    # Find swing points (3-bar pivot)
+    highs = []; lows = []
+    for idx in range(2, len(recent)-2):
+        r = recent.iloc[idx]
+        if r["high"] >= recent.iloc[idx-1]["high"] and r["high"] >= recent.iloc[idx-2]["high"] and \
+           r["high"] >= recent.iloc[idx+1]["high"] and r["high"] >= recent.iloc[idx+2]["high"]:
+            highs.append(float(r["high"]))
+        if r["low"] <= recent.iloc[idx-1]["low"] and r["low"] <= recent.iloc[idx-2]["low"] and \
+           r["low"] <= recent.iloc[idx+1]["low"] and r["low"] <= recent.iloc[idx+2]["low"]:
+            lows.append(float(r["low"]))
+    if len(highs) < 2 or len(lows) < 2:
+        return True  # Not enough data, don't filter
+    if direction == "Buy":
+        # Higher highs AND higher lows
+        hh = highs[-1] > highs[-2]
+        hl = lows[-1] > lows[-2]
+        return hh and hl
     else:
-        close = float(df.iloc[-1]["close"])
-        price_src = "TD"
-    risk=abs(entry-sl)
-    if risk<=0: return {"r_now":0.0,"status":"Invalid","advice":"Stop=0","health_pct":50,"color":"#8b9ab0","price_src":price_src,"close":close}
-    r_now=(close-entry)/risk if direction=="Buy" else (entry-close)/risk
-    hp=int(max(5,min(95,50+r_now*25)))
-    if r_now>=1.0: return {"r_now":round(r_now,2),"status":"Profit zone","advice":"TP1 hit — move SL to BE.","health_pct":hp,"color":"#10b981","price_src":price_src,"close":close}
-    if r_now>=0.0: return {"r_now":round(r_now,2),"status":"In trade","advice":"In profit, TP1 not yet hit. Hold.","health_pct":hp,"color":"#00d4aa","price_src":price_src,"close":close}
-    if r_now>=-0.5:return {"r_now":round(r_now,2),"status":"Minor drawdown","advice":"Normal pullback. Structure must hold.","health_pct":hp,"color":"#f59e0b","price_src":price_src,"close":close}
-    if r_now>=-0.8:return {"r_now":round(r_now,2),"status":"Near stop","advice":"Approaching SL — prepare to exit.","health_pct":hp,"color":"#f97316","price_src":price_src,"close":close}
-    return {"r_now":round(r_now,2),"status":"Stop breached","advice":"Price beyond SL. Exit now.","health_pct":hp,"color":"#ef4444","price_src":price_src,"close":close}
+        # Lower highs AND lower lows
+        lh = highs[-1] < highs[-2]
+        ll = lows[-1] < lows[-2]
+        return lh and ll
 
-# ============================================================
-# CHART
-# ============================================================
-def build_chart(df:pd.DataFrame, plan:Plan, symbol:str) -> go.Figure:
-    n=min(120,len(df)); dfc=df.tail(n)
-    fig=make_subplots(rows=2,cols=1,shared_xaxes=True,row_heights=[0.72,0.28],
-                      vertical_spacing=0.04)
-    # Candles
-    fig.add_trace(go.Candlestick(x=dfc["time"],open=dfc["open"],high=dfc["high"],
-                                  low=dfc["low"],close=dfc["close"],name="Price",
-                                  increasing_fillcolor="#10b981",increasing_line_color="#10b981",
-                                  decreasing_fillcolor="#ef4444",decreasing_line_color="#ef4444"),row=1,col=1)
-    # EMAs
-    for col2,color,nm in [("ema20","#00d4aa","EMA20"),("ema50","#f59e0b","EMA50"),("ema200","#8b9ab0","EMA200")]:
-        if col2 in dfc: fig.add_trace(go.Scatter(x=dfc["time"],y=dfc[col2],mode="lines",name=nm,
-                                                  line=dict(color=color,width=1.2)),row=1,col=1)
-    # Bollinger Bands
-    if "bb_upper" in dfc:
-        fig.add_trace(go.Scatter(x=dfc["time"],y=dfc["bb_upper"],mode="lines",name="BB Upper",
-                                  line=dict(color="rgba(99,102,241,0.4)",width=1,dash="dot")),row=1,col=1)
-        fig.add_trace(go.Scatter(x=dfc["time"],y=dfc["bb_lower"],mode="lines",name="BB Lower",
-                                  line=dict(color="rgba(99,102,241,0.4)",width=1,dash="dot"),
-                                  fill="tonexty",fillcolor="rgba(99,102,241,0.04)"),row=1,col=1)
-    # Levels
-    for lbl,val,col3 in [("Entry",plan.entry,"#00d4aa"),("SL",plan.sl,"#ef4444"),
-                          ("TP1",plan.tp1,"#a78bfa"),("TP2",plan.tp2,"#10b981")]:
-        if val: fig.add_hline(y=val,line=dict(color=col3,width=1,dash="dot"),
-                               annotation_text=lbl,annotation_font_color=col3,row=1,col=1)
-    # MACD
-    if "macd_hist" in dfc:
-        colors=["#10b981" if v>=0 else "#ef4444" for v in dfc["macd_hist"]]
-        fig.add_trace(go.Bar(x=dfc["time"],y=dfc["macd_hist"],name="MACD Hist",
-                              marker_color=colors,opacity=0.7),row=2,col=1)
-        fig.add_trace(go.Scatter(x=dfc["time"],y=dfc["macd"],mode="lines",name="MACD",
-                                  line=dict(color="#00d4aa",width=1)),row=2,col=1)
-        fig.add_trace(go.Scatter(x=dfc["time"],y=dfc["macd_sig"],mode="lines",name="Signal",
-                                  line=dict(color="#f59e0b",width=1)),row=2,col=1)
-    fig.update_layout(template="plotly_dark",height=500,margin=dict(l=8,r=8,t=8,b=8),
-                      xaxis_rangeslider_visible=False,
-                      legend=dict(orientation="h",yanchor="bottom",y=1.01,xanchor="right",x=1))
-    return fig
+def _gold_direction(df, df_h4):
+    """
+    Gold-specific direction using faster EMA9/EMA21 + price structure.
+    More responsive than standard EMA20/50/200 for gold scalping.
+    """
+    if len(df) < 25:
+        return "Wait"
+    row = df.iloc[-1]
+    close = float(row["close"])
+    e9  = float(row.get("ema9",  close))
+    e21 = float(row.get("ema21", close))
+    e50 = float(row.get("ema50", close))
+    rsi = float(row.get("rsi14", 50) or 50)
+    mh  = float(row.get("macd_hist", 0) or 0)
 
-# ============================================================
-# PANEL HELPERS
-# ============================================================
-def render_kv_panel(title,rows):
-    html=["<div class='panel'>",f"<div class='mono-title'>{title}</div>"]
-    for k,v,klass in rows:
-        c=f" class='{klass}'" if klass else ""
-        html.append(f"<div class='kv'><span class='muted'>{k}</span><span{c}>{v}</span></div>")
-    html.append("</div>"); st.markdown("".join(html),unsafe_allow_html=True)
+    # H4 trend still matters for gold but with less weight
+    h4t = _h4_trend(df_h4)
 
-def render_signal_badge(direction,status):
-    if "HIGH NEWS" in status:     cls,text="signal-sell","⚠ HIGH NEWS — WAIT"
-    elif status!="Ready to Enter":cls,text="signal-wait","◆ WAIT"
-    elif direction=="Buy":         cls,text="signal-buy","▲ BUY — READY"
-    elif direction=="Sell":        cls,text="signal-sell","▼ SELL — READY"
-    else:                          cls,text="signal-wait","◆ WAIT"
-    st.markdown(f"<div class='signal-box {cls}'>{text}</div>",unsafe_allow_html=True)
+    bull = 0; bear = 0
+    # Fast EMA cross (most important for gold scalping)
+    if e9 > e21: bull += 2
+    elif e9 < e21: bear += 2
+    # Price above/below EMA21
+    if close > e21: bull += 1
+    elif close < e21: bear += 1
+    # EMA21 vs EMA50 (medium trend)
+    if e21 > e50: bull += 1
+    elif e21 < e50: bear += 1
+    # MACD histogram direction
+    if mh > 0: bull += 1
+    elif mh < 0: bear += 1
+    # H4 alignment (1 point, not dominant)
+    if h4t in ("bull", "bull_weak"): bull += 1
+    elif h4t in ("bear", "bear_weak"): bear += 1
+    # RSI midline
+    if rsi > 55: bull += 1
+    elif rsi < 45: bear += 1
 
-# ============================================================
-# SCORE PANEL  (V12: confluence bar + breakdown)
-# ============================================================
-def render_score_panel(plan:Plan,df:pd.DataFrame,
-                       active_entry=None,active_sl=None,active_dir=None):
-    gc=grade_color(plan.final_grade); adj=plan.news_adj
-    adj_html=(f"<span style='color:#10b981;'>+{adj}</span>" if adj>0
-              else f"<span style='color:#ef4444;'>{adj}</span>" if adj<0
-              else "<span style='color:#8b9ab0;'>0</span>")
-    # Confluence indicator
-    filled=plan.confluence_count; total=6
-    conf_color="#10b981" if filled>=4 else "#f59e0b" if filled>=2 else "#ef4444"
-    conf_dots="".join([f"<span style='color:{conf_color};'>●</span>" if i<filled
-                       else "<span style='color:#2a3441;'>●</span>" for i in range(total)])
+    # Need strong conviction for gold (5/7 signals)
+    if bull >= 5: return "Buy"
+    if bear >= 5: return "Sell"
+    return "Wait"
 
-    # Score breakdown table
-    bd_html=""
-    for k,v in plan.score_breakdown.items():
-        maxv={"EMA Stack":20,"Pullback":15,"MACD":15,"RSI":10,"Candle":10,"R:R":20,"Session":10}.get(k,10)
-        pct=int(v/max(maxv,1)*100)
-        bar_col="#10b981" if pct>=70 else "#f59e0b" if pct>=40 else "#ef4444"
-        bd_html+=(f"<div style='display:flex;align-items:center;gap:8px;margin:3px 0;font-size:11px;'>"
-                  f"<span style='color:#8b9ab0;width:70px;flex-shrink:0;'>{k}</span>"
-                  f"<div style='background:#131a22;border-radius:3px;flex:1;height:5px;'>"
-                  f"<div style='width:{pct}%;height:100%;background:{bar_col};border-radius:3px;'></div></div>"
-                  f"<span style='color:{bar_col};width:28px;text-align:right;font-family:Space Mono,monospace;'>{v}</span>"
-                  f"</div>")
+def determine_direction(df, df_h4, symbol=""):
+    """Determine trade direction. Gold uses fast EMA system, others use H4+EMA stack."""
+    # Gold-specific direction detection
+    if norm(symbol) == "XAUUSD":
+        return _gold_direction(df, df_h4)
 
-    st.markdown(f"""<div class='panel'>
-      <div class='mono-title'>SIGNAL SCORE <span style='color:#4a5568;font-size:10px;'>— locked at signal</span></div>
-      <div style='display:flex;align-items:center;gap:14px;margin-bottom:8px;flex-wrap:wrap;'>
-        <div><div style='font-size:10px;color:#8b9ab0;'>TECH</div>
-          <div style='font-family:Space Mono,monospace;font-size:26px;font-weight:700;color:{grade_color(plan.setup_grade)};'>{plan.setup_score}</div></div>
-        <div style='color:#4a5568;font-size:18px;'>+</div>
-        <div><div style='font-size:10px;color:#8b9ab0;'>NEWS</div>
-          <div style='font-family:Space Mono,monospace;font-size:26px;font-weight:700;'>{adj_html}</div></div>
-        <div style='color:#4a5568;font-size:18px;'>=</div>
-        <div><div style='font-size:10px;color:#8b9ab0;'>FINAL</div>
-          <div style='font-family:Space Mono,monospace;font-size:26px;font-weight:700;color:{gc};'>
-            {plan.final_score}<span style='font-size:14px;'> {plan.final_grade}</span></div></div>
-      </div>
-      <div style='background:#131a22;border-radius:4px;height:5px;margin-bottom:10px;overflow:hidden;'>
-        <div style='height:100%;border-radius:4px;background:{gc};width:{plan.final_score}%;'></div></div>
-      <div style='margin-bottom:8px;'>
-        <span style='font-size:10px;color:#8b9ab0;font-family:Space Mono,monospace;'>CONFLUENCE </span>
-        {conf_dots}
-        <span style='font-size:10px;color:{conf_color};font-family:Space Mono,monospace;'> {filled}/{total}</span>
-      </div>
-      {bd_html}
-      <div style='font-size:11px;color:#8b9ab0;border-top:1px solid rgba(255,255,255,0.05);padding-top:6px;margin-top:6px;'>
-        <b style='color:#e8edf2;'>Session:</b> {plan.session_label} &nbsp;|&nbsp;
-        <b style='color:#e8edf2;'>MTF:</b> {'✓ Aligned' if plan.mtf_aligned else '✗ Conflict'}
-      </div>
-    </div>""",unsafe_allow_html=True)
+    h4t = _h4_trend(df_h4)
+    row  = df.iloc[-1]
+    e20  = float(row.get("ema20",  row["close"]))
+    e50  = float(row.get("ema50",  row["close"]))
+    e200 = float(row.get("ema200", row["close"]))
+    close = float(row["close"])
+    bull_score = (1 if h4t in ("bull","bull_weak") else 0) + \
+                 (1 if e20>e50 else 0) + (1 if e50>e200 else 0) + (1 if close>e200 else 0)
+    bear_score = (1 if h4t in ("bear","bear_weak") else 0) + \
+                 (1 if e20<e50 else 0) + (1 if e50<e200 else 0) + (1 if close<e200 else 0)
+    if bull_score >= 3: return "Buy"
+    if bear_score >= 3: return "Sell"
+    return "Wait"
 
-    # Live Health
-    live_health=None
-    if active_entry and active_sl and active_dir:
-        # Use the TRADE's symbol for price — may differ from the currently viewed symbol
-        # Find the trade for this symbol to get correct price for Live Health
-        _all_trades=st.session_state.get("active_trades",[])
-        _active_trade=next((t for t in _all_trades if t.get("symbol",plan.symbol)==plan.symbol),
-                           (_all_trades[0] if _all_trades else {}))
-        _trade_sym_h=_active_trade.get("symbol", plan.symbol)
-        # Price priority: MetaApi tick (trade's symbol) > Twelve Data
-        _ma_tick=fetch_mt5_price(_trade_sym_h,get_ma_token(),get_ma_account()) if (get_ma_token() and get_ma_account()) else None
-        if _ma_tick:
-            _mt5_for_health=_ma_tick["bid"]
+def compute_levels(entry, direction, atr, symbol, df=None):
+    """
+    Smart SL/TP: uses swing highs/lows when available, ATR fallback.
+    TP1 targets nearest reachable swing level (min R:R 1.5).
+    TP2 uses ATR extension beyond TP1.
+    """
+    c = cfg(symbol)
+    min_rr = c.get("min_rr", 1.5)
+
+    # ── SL: ATR-based (proven reliable) ───────────────────────
+    sl_d = atr * c["atr_sl"]
+    if direction == "Buy":
+        sl = entry - sl_d
+    else:
+        sl = entry + sl_d
+
+    # ── TP1: ATR-based (proven reliable) ──────────────────────
+    tp1_d = atr * c["atr_tp1"]
+    if direction == "Buy":
+        tp1 = entry + tp1_d
+    else:
+        tp1 = entry - tp1_d
+
+    # ── TP2: ATR extension beyond TP1 ─────────────────────────
+    tp2_extra = atr * c["atr_sl"] * 2
+    if direction == "Buy":
+        tp2 = tp1 + tp2_extra
+    else:
+        tp2 = tp1 - tp2_extra
+
+    # ── Safety check: ensure SL/TP on correct side ─────────
+    if direction == "Buy":
+        if sl >= entry:   # SL must be BELOW entry for Buy
+            sl = entry - sl_d
+        if tp1 <= entry:  # TP1 must be ABOVE entry for Buy
+            tp1 = entry + atr * c["atr_tp1"]
+            tp1_d = tp1 - entry
+            tp2 = tp1 + tp2_extra
+    else:
+        if sl <= entry:   # SL must be ABOVE entry for Sell
+            sl = entry + sl_d
+        if tp1 >= entry:  # TP1 must be BELOW entry for Sell
+            tp1 = entry - atr * c["atr_tp1"]
+            tp1_d = entry - tp1
+            tp2 = tp1 - tp2_extra
+
+    rr = tp1_d / sl_d if sl_d > 0 else 0
+    return {"sl":sl,"tp1":tp1,"tp2":tp2,"sl_d":sl_d,"tp1_d":tp1_d,"rr":rr}
+
+def _is_overextended(df, direction, atr, threshold=3.0):
+    """Check if price has moved too far too fast (overextended)."""
+    if len(df) < 20:
+        return False
+    close = float(df.iloc[-1]["close"])
+    close_20 = float(df.iloc[-20]["close"])
+    move = abs(close - close_20)
+    if move > atr * threshold:
+        return True
+    rsi = float(df.iloc[-1].get("rsi14", 50) or 50)
+    if direction == "Buy" and rsi > 75 and move > atr * 2:
+        return True
+    if direction == "Sell" and rsi < 25 and move > atr * 2:
+        return True
+    return False
+
+# ── Spike Detection System ────────────────────────────────────
+def detect_spike(df, atr, symbol, lookback=5):
+    """
+    Detect sudden price spikes (news/liquidity events).
+    Returns dict: {is_spike, direction, magnitude, spike_atr_ratio, alert_level}
+    - alert_level: "none" | "warning" | "danger" | "opportunity"
+    """
+    if len(df) < lookback + 2:
+        return {"is_spike": False, "direction": None, "magnitude": 0,
+                "spike_atr_ratio": 0, "alert_level": "none", "message": ""}
+
+    c = cfg(symbol)
+    asset = c.get("asset_class", "forex")
+
+    # Spike thresholds vary by asset class
+    spike_thresholds = {
+        "forex":  {"warn": 2.0, "danger": 3.5, "opportunity": 4.5},
+        "gold":   {"warn": 2.5, "danger": 4.0, "opportunity": 5.5},
+        "oil":    {"warn": 2.5, "danger": 4.0, "opportunity": 5.5},
+        "crypto": {"warn": 3.0, "danger": 5.0, "opportunity": 7.0},
+    }
+    th = spike_thresholds.get(asset, spike_thresholds["forex"])
+
+    # Check last bar's range vs ATR
+    last = df.iloc[-1]
+    bar_range = abs(float(last["high"]) - float(last["low"]))
+    ratio = bar_range / atr if atr > 0 else 0
+
+    # Check momentum: last N bars cumulative move
+    recent_close = float(df.iloc[-1]["close"])
+    past_close   = float(df.iloc[-(lookback+1)]["close"])
+    move = abs(recent_close - past_close)
+    move_ratio = move / atr if atr > 0 else 0
+    spike_dir = "Bull" if recent_close > past_close else "Bear"
+
+    # Body ratio (large body = conviction, small body = wick spike)
+    body = abs(float(last["close"]) - float(last["open"]))
+    body_ratio = body / bar_range if bar_range > 0 else 0
+
+    # Determine spike level
+    effective_ratio = max(ratio, move_ratio)
+
+    if effective_ratio >= th["opportunity"]:
+        # Massive spike — could be opportunity for reversal or continuation
+        if body_ratio > 0.6:
+            alert = "opportunity"
+            msg = f"🚀 SPIKE {spike_dir.upper()} — {effective_ratio:.1f}× ATR | Strong momentum, potential continuation"
         else:
-            _mt5_for_health=None
-        live_health=compute_live_health(active_entry,active_sl,active_dir,df,mt5_price=_mt5_for_health)
-        hc=live_health["color"]; hp=live_health["health_pct"]
-        src_label=live_health.get("price_src","TD")
-        src_col="#00d4aa" if src_label=="MT5" else "#f59e0b"
-        src_note=f"<span style='font-size:9px;color:{src_col};margin-left:6px;'>price: {src_label} {fmt_price(live_health.get('close',0),'')}</span>"
-        st.markdown(f"""<div class='panel'>
-          <div class='mono-title'>LIVE HEALTH <span style='color:#4a5568;font-size:10px;'>— post-entry</span>{src_note}</div>
-          <div style='display:flex;align-items:center;gap:14px;margin-bottom:8px;'>
-            <div style='font-family:Space Mono,monospace;font-size:26px;font-weight:700;color:{hc};'>{hp}%</div>
-            <div><div style='font-size:13px;font-weight:600;color:{hc};'>{live_health['status']}</div>
-              <div style='font-size:11px;color:#8b9ab0;'>R = {live_health['r_now']:+.2f}</div></div>
-          </div>
-          <div style='background:#131a22;border-radius:4px;height:5px;margin-bottom:8px;overflow:hidden;'>
-            <div style='height:100%;border-radius:4px;background:{hc};width:{hp}%;'></div></div>
-          <div style='font-size:12px;color:#e8edf2;padding:8px;background:#131a22;border-radius:5px;'>{live_health['advice']}</div>
-        </div>""",unsafe_allow_html=True)
+            alert = "danger"
+            msg = f"⚠️ SPIKE {spike_dir.upper()} — {effective_ratio:.1f}× ATR | Wick rejection, avoid entry"
+    elif effective_ratio >= th["danger"]:
+        alert = "danger"
+        msg = f"🔴 SPIKE {spike_dir.upper()} — {effective_ratio:.1f}× ATR | High volatility, widen SL or stay out"
+    elif effective_ratio >= th["warn"]:
+        alert = "warning"
+        msg = f"🟡 Elevated volatility — {effective_ratio:.1f}× ATR | Monitor closely"
     else:
-        st.markdown("""<div class='panel' style='border-color:rgba(255,255,255,0.04);'>
-          <div class='mono-title' style='color:#4a5568;'>LIVE HEALTH — enter trade to activate</div>
-        </div>""",unsafe_allow_html=True)
+        alert = "none"
+        msg = ""
 
-    # Grok AI Advisor
-    _render_ai_panel(plan,df,live_health,active_entry,active_sl,active_dir)
+    return {
+        "is_spike": effective_ratio >= th["warn"],
+        "direction": spike_dir,
+        "magnitude": round(move, c["dec"]),
+        "spike_atr_ratio": round(effective_ratio, 2),
+        "body_ratio": round(body_ratio, 2),
+        "alert_level": alert,
+        "message": msg,
+    }
 
-def _render_ai_panel(plan,df,live_health,active_entry,active_sl,active_dir):
-    xai=get_xai_key()
-    # ── Panel wrapper uses st.container + border styling via markdown above ──
-    st.markdown("""<div style='background:#0d1117;border:1px solid rgba(99,102,241,0.2);
-        border-left:3px solid #6366f1;border-radius:8px;padding:12px 14px;margin-bottom:10px;'>
-        <div style='color:#6366f1;font-size:11px;font-family:Space Mono,monospace;
-        letter-spacing:.12em;margin-bottom:8px;'>
-        GROK AI ADVISOR <span style='color:#4a5568;font-size:10px;'>— xAI Grok</span></div>
-        </div>""", unsafe_allow_html=True)
-    if not xai:
-        st.markdown("<div style='font-size:12px;color:#4a5568;margin:-6px 0 8px;'>No xAI key — enter it in the sidebar.</div>",unsafe_allow_html=True)
-        return
-    if active_entry is None:
-        st.markdown("<div style='font-size:12px;color:#4a5568;margin:-6px 0 8px;'>Enter a trade above to activate AI advice.</div>",unsafe_allow_html=True)
-        return
-    trade_key=f"ai_{plan.symbol}_{active_entry:.5f}"
-    news_dict={"risk":plan.news_risk,"bias":plan.news_bias,"summary":plan.news_summary,"ok":plan.news_ok}
-    if trade_key not in st.session_state:
-        with st.spinner("Grok analysing your trade…"):
-            st.session_state[trade_key]=get_ai_trade_advice(plan,df,live_health,news_dict)
-    advice=st.session_state.get(trade_key,"")
-    if advice:
-        safe_advice=advice.replace("<","&lt;").replace(">","&gt;").replace("\n","<br>")
-        st.markdown(f"""<div class='ai-bubble'>
-            <div class='ai-header'>◈ AUTO-ANALYSIS</div>{safe_advice}</div>""",
-            unsafe_allow_html=True)
-    user_q=st.text_input("Ask Grok anything about this trade…",
-                          placeholder="e.g. Should I move SL to breakeven?",
-                          key=f"gq_{plan.symbol}")
-    if st.button("⚡ Ask Grok",key=f"gb_{plan.symbol}"):
-        if user_q.strip():
-            with st.spinner("Grok is thinking…"):
-                st.session_state[f"gr_{plan.symbol}"]=get_ai_trade_advice(plan,df,live_health,news_dict,user_q)
+def spike_adjusted_levels(entry, direction, atr, symbol, spike_info, df=None):
+    """
+    Adjust SL/TP when spike is detected:
+    - Danger: widen SL by 50%, keep TP
+    - Opportunity: normal SL, extend TP2
+    """
+    lvl = compute_levels(entry, direction, atr, symbol, df=df)
+    if not spike_info.get("is_spike"):
+        return lvl
+
+    alert = spike_info["alert_level"]
+    if alert == "danger":
+        # Widen SL to account for spike volatility
+        wider_sl_d = lvl["sl_d"] * 1.5
+        if direction == "Buy":
+            lvl["sl"] = entry - wider_sl_d
         else:
-            st.warning("Type a question first.")
-    reply=st.session_state.get(f"gr_{plan.symbol}","")
-    if reply:
-        safe_reply=reply.replace("<","&lt;").replace(">","&gt;").replace("\n","<br>")
-        st.markdown(f"""<div class='ai-bubble' style='border-left-color:#0ea5e9;background:rgba(14,165,233,.06);'>
-            <div class='ai-header' style='color:#0ea5e9;'>◈ GROK REPLY</div>{safe_reply}</div>""",
-            unsafe_allow_html=True)
+            lvl["sl"] = entry + wider_sl_d
+        lvl["sl_d"] = wider_sl_d
+        # Recalculate R:R
+        lvl["rr"] = lvl["tp1_d"] / wider_sl_d if wider_sl_d > 0 else 0
+    elif alert == "opportunity":
+        # Extend TP2 for spike continuation
+        c = cfg(symbol)
+        extended_tp2 = atr * c["atr_tp2"] * 1.5
+        if direction == "Buy":
+            lvl["tp2"] = entry + extended_tp2
+        else:
+            lvl["tp2"] = entry - extended_tp2
+
+    return lvl
 
 # ============================================================
-# NEWS PANEL
+# GOLD ENGINE — Professional XAUUSD Trading System
 # ============================================================
-def render_news_panel(plan:Plan):
-    xai=get_xai_key()
-    if not xai:
-        st.markdown("<div class='panel' style='border-color:rgba(255,255,255,0.04);'><div class='mono-title' style='color:#4a5568;'>GROK NEWS — no xAI key</div></div>",unsafe_allow_html=True); return
-    risk=plan.news_risk; adj=plan.news_adj; bias=plan.news_bias
-    risk_col={"HIGH":"#ef4444","MEDIUM":"#f59e0b","LOW":"#10b981"}.get(risk,"#10b981")
-    bias_col={"bull":"#10b981","bear":"#ef4444"}.get(bias,"#8b9ab0")
-    adj_str=(f"+{adj}" if adj>0 else str(adj))
-    adj_col="#10b981" if adj>0 else "#ef4444" if adj<0 else "#8b9ab0"
-    # Escape dynamic content to prevent HTML injection / broken structure
-    safe_summary = str(plan.news_summary).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-    evts="".join(
-        f"<div style='font-size:11px;color:#8b9ab0;padding:2px 0;'>▸ {str(e).replace('<','&lt;').replace('>','&gt;')}</div>"
-        for e in (plan.news_events or [])
-    )
-    high_banner = ('<div style="font-size:11px;color:#ef4444;margin-top:6px;padding:5px;'
-                   'background:rgba(239,68,68,.08);border-radius:4px;">'
-                   '⚠ HIGH RISK: Signal blocked until event resolves.</div>') if risk=="HIGH" else ""
-    # NOTE: closing </div> must NOT be indented — 4-space indent = markdown code block
-    html = (f"<div class='panel news-{risk}'>"
-            f"<div class='mono-title'>GROK NEWS <span style='color:#4a5568;font-size:10px;'>— live via xAI</span></div>"
-            f"<div style='display:flex;gap:20px;margin-bottom:6px;flex-wrap:wrap;'>"
-            f"<div><div style='font-size:10px;color:#8b9ab0;'>RISK</div>"
-            f"<div style='font-family:Space Mono,monospace;font-size:14px;font-weight:700;color:{risk_col};'>{risk}</div></div>"
-            f"<div><div style='font-size:10px;color:#8b9ab0;'>SCORE ADJ</div>"
-            f"<div style='font-family:Space Mono,monospace;font-size:14px;font-weight:700;color:{adj_col};'>{adj_str}</div></div>"
-            f"<div><div style='font-size:10px;color:#8b9ab0;'>BIAS</div>"
-            f"<div style='font-family:Space Mono,monospace;font-size:14px;font-weight:700;color:{bias_col};'>{bias.upper()}</div></div>"
-            f"</div>"
-            f"<div style='font-size:12px;color:#e8edf2;margin-bottom:4px;'>{safe_summary}</div>"
-            f"{evts}{high_banner}</div>")
-    st.markdown(html, unsafe_allow_html=True)
+def _gold_asian_range(df):
+    """
+    Calculate Asian session range (00:00-08:00 UTC).
+    Returns dict: {high, low, range, valid}
+    """
+    if "time" not in df.columns or len(df) < 20:
+        return {"high": 0, "low": 0, "range": 0, "valid": False}
 
-# ============================================================
-# TRADE TRACKER  (multi-trade: active_trades = list of dicts)
-# ============================================================
-def _tp_pct_dir(tp, entry, live_price, direction):
-    """Direction-aware TP progress %. Returns 0 if price moved wrong way."""
-    if not tp: return None
     try:
-        tp_f  = float(tp); e = float(entry)
-        total = abs(tp_f - e)
-        if total == 0: return None
-        # TP must be in the correct direction from entry
-        if direction == "Buy"  and tp_f <= e: return 0
-        if direction == "Sell" and tp_f >= e: return 0
-        done = (live_price - e) if direction == "Buy" else (e - live_price)
-        if done <= 0: return 0
-        return min(int(done / total * 100), 100)
-    except:
-        return None
+        times = pd.to_datetime(df["time"], utc=True)
+    except Exception:
+        return {"high": 0, "low": 0, "range": 0, "valid": False}
 
-def _prog_bar_html(pct, color):
-    filled = max(0, min(pct, 100))
+    today = times.iloc[-1].normalize()
+    asian_mask = (times >= today) & (times.dt.hour < 8)
+    asian_bars = df.loc[asian_mask]
+
+    if len(asian_bars) < 3:
+        # Try yesterday's Asian session
+        yesterday = today - pd.Timedelta(days=1)
+        asian_mask = (times >= yesterday) & (times < today) & (times.dt.hour < 8)
+        asian_bars = df.loc[asian_mask]
+
+    if len(asian_bars) < 3:
+        return {"high": 0, "low": 0, "range": 0, "valid": False}
+
+    ah = float(asian_bars["high"].max())
+    al = float(asian_bars["low"].min())
+    return {"high": ah, "low": al, "range": ah - al, "valid": True}
+
+def _gold_breakout_signal(df, asian_range, atr):
+    """
+    Detect London breakout of Asian range.
+    Returns: "bull_breakout" | "bear_breakout" | "inside" | "invalid"
+    """
+    if not asian_range["valid"] or asian_range["range"] == 0:
+        return "invalid"
+
+    close = float(df.iloc[-1]["close"])
+    ah = asian_range["high"]
+    al = asian_range["low"]
+
+    # Need clear breakout (at least 0.3× ATR beyond range)
+    margin = atr * 0.3
+    if close > ah + margin:
+        return "bull_breakout"
+    elif close < al - margin:
+        return "bear_breakout"
+    return "inside"
+
+def _gold_liquidity_sweep(df, atr, lookback=30):
+    """
+    Detect liquidity sweep: price spikes beyond recent high/low then reverses.
+    This is a classic institutional pattern.
+    Returns: {"detected": bool, "direction": "bull"/"bear", "sweep_level": float}
+    """
+    if len(df) < lookback + 5:
+        return {"detected": False, "direction": None, "sweep_level": 0}
+
+    recent = df.iloc[-(lookback+5):-5]
+    last5  = df.iloc[-5:]
+
+    recent_high = float(recent["high"].max())
+    recent_low  = float(recent["low"].min())
+    last_high   = float(last5["high"].max())
+    last_low    = float(last5["low"].min())
+    close       = float(df.iloc[-1]["close"])
+
+    sweep_margin = atr * 0.5
+
+    # Bearish sweep: price spiked ABOVE recent high then closed back below → sell signal
+    if last_high > recent_high + sweep_margin and close < recent_high:
+        return {"detected": True, "direction": "bear", "sweep_level": recent_high}
+
+    # Bullish sweep: price spiked BELOW recent low then closed back above → buy signal
+    if last_low < recent_low - sweep_margin and close > recent_low:
+        return {"detected": True, "direction": "bull", "sweep_level": recent_low}
+
+    return {"detected": False, "direction": None, "sweep_level": 0}
+
+
+def _gold_momentum_filter(df, direction):
+    """
+    Gold-specific momentum: checks multiple timeframe momentum alignment.
+    Returns bonus score (0-15).
+    """
+    if len(df) < 50:
+        return 0
+
+    close = float(df.iloc[-1]["close"])
+    # Short-term momentum (5 bars)
+    c5 = float(df.iloc[-6]["close"])
+    mom5 = close - c5
+    # Medium momentum (20 bars)
+    c20 = float(df.iloc[-21]["close"])
+    mom20 = close - c20
+
+    score = 0
+    if direction == "Sell":
+        if mom5 < 0:  score += 5   # short-term bearish
+        if mom20 < 0: score += 5   # medium bearish
+        # Acceleration: momentum increasing
+        if mom5 < mom20 * 0.3: score += 5
+    else:  # Buy
+        if mom5 > 0:  score += 5
+        if mom20 > 0: score += 5
+        if mom5 > mom20 * 0.3: score += 5
+
+    return score
+
+def _gold_candle_quality(df, direction):
+    """
+    Gold-specific candle quality check.
+    Looks for momentum candles, pin bars, and rejection patterns.
+    Returns score 0-10.
+    """
+    if len(df) < 3:
+        return 0
+    c = df.iloc[-1]; p = df.iloc[-2]
+    body = abs(float(c["close"]) - float(c["open"]))
+    rng = float(c["high"]) - float(c["low"])
+    if rng == 0:
+        return 0
+    body_ratio = body / rng
+
+    score = 0
+    if direction == "Buy":
+        # Bullish momentum candle: large body, close near high
+        upper_wick = float(c["high"]) - max(float(c["close"]), float(c["open"]))
+        if float(c["close"]) > float(c["open"]) and body_ratio > 0.6:
+            score += 5
+        # Bullish pin bar: long lower wick, small body at top
+        lower_wick = min(float(c["close"]), float(c["open"])) - float(c["low"])
+        if lower_wick > body * 2 and upper_wick < body:
+            score += 5
+        # Close above previous high
+        if float(c["close"]) > float(p["high"]):
+            score += 3
+    else:
+        # Bearish momentum candle
+        lower_wick = min(float(c["close"]), float(c["open"])) - float(c["low"])
+        if float(c["close"]) < float(c["open"]) and body_ratio > 0.6:
+            score += 5
+        # Bearish pin bar: long upper wick
+        upper_wick = float(c["high"]) - max(float(c["close"]), float(c["open"]))
+        if upper_wick > body * 2 and lower_wick < body:
+            score += 5
+        # Close below previous low
+        if float(c["close"]) < float(p["low"]):
+            score += 3
+
+    return min(10, score)
+
+def gold_engine_score(df, df_h4, direction, base_score, base_grade):
+    """
+    Gold-specific scoring overlay. Adds professional gold trading filters
+    on top of the base signal score.
+    Returns: (adjusted_score, gold_info_dict, adjusted_grade, extra_warns)
+    """
+    row   = df.iloc[-1]
+    atr   = float(row.get("atr14", 0.001) or 0.001)
+    close = float(row["close"])
+    c = cfg("XAUUSD")
+    extra_warns = []
+    gold_info = {}
+    bonus = 0
+
+    # 1. Asian Range Breakout
+    asian = _gold_asian_range(df)
+    gold_info["asian_range"] = asian
+    if asian["valid"]:
+        breakout = _gold_breakout_signal(df, asian, atr)
+        gold_info["breakout"] = breakout
+        if breakout == "bear_breakout" and direction == "Sell":
+            bonus += 10
+            gold_info["breakout_aligned"] = True
+        elif breakout == "bull_breakout" and direction == "Buy":
+            bonus += 10
+            gold_info["breakout_aligned"] = True
+        elif breakout == "inside":
+            bonus -= 5
+            extra_warns.append("⚠ Gold inside Asian range — wait for breakout")
+            gold_info["breakout_aligned"] = False
+        else:
+            gold_info["breakout_aligned"] = False
+    else:
+        gold_info["breakout"] = "no_data"
+        gold_info["breakout_aligned"] = False
+
+    # 2. Liquidity Sweep Detection
+    sweep = _gold_liquidity_sweep(df, atr)
+    gold_info["sweep"] = sweep
+    if sweep["detected"]:
+        if sweep["direction"] == "bear" and direction == "Sell":
+            bonus += 10
+            extra_warns.append(f"🏦 Liquidity sweep detected above {sweep['sweep_level']:.2f} — institutional sell signal")
+        elif sweep["direction"] == "bull" and direction == "Buy":
+            bonus += 10
+            extra_warns.append(f"🏦 Liquidity sweep detected below {sweep['sweep_level']:.2f} — institutional buy signal")
+        elif sweep["direction"] != direction.lower()[:4]:
+            bonus -= 10
+            extra_warns.append(f"⚠ Liquidity sweep opposes your direction — caution")
+
+    # 3. Gold Momentum Filter
+    mom_bonus = _gold_momentum_filter(df, direction)
+    gold_info["momentum_bonus"] = mom_bonus
+    bonus += mom_bonus
+
+    # 4. Session Filter — Gold performs best at London/NY overlap
+    sess_name = get_session_now()
+    if "Overlap" in sess_name:
+        bonus += 5
+        gold_info["session_quality"] = "prime"
+    elif "London" in sess_name or "NewYork" in sess_name:
+        bonus += 2
+        gold_info["session_quality"] = "good"
+    elif "Asian" in sess_name:
+        bonus -= 5
+        gold_info["session_quality"] = "range"
+        extra_warns.append("⚠ Gold Asian session — range-bound, avoid breakout trades")
+    else:
+        gold_info["session_quality"] = "off"
+
+    # 5. Overextension check for gold
+    if len(df) >= 20:
+        c20 = float(df.iloc[-20]["close"])
+        move_20 = abs(close - c20)
+        if move_20 > atr * 4:
+            bonus -= 10
+            extra_warns.append(f"⚠ Gold overextended: moved {move_20:.2f} in 20 bars ({move_20/atr:.1f}× ATR)")
+
+    # Calculate adjusted score
+    adjusted_score = min(100, max(0, base_score + bonus))
+    gold_info["bonus"] = bonus
+    gold_info["adjusted_score"] = adjusted_score
+
+    # Re-grade with adjusted score
+    if   adjusted_score >= c["grade_aplus"]: adjusted_grade = "A+"
+    elif adjusted_score >= c["grade_a"]:    adjusted_grade = "A"
+    elif adjusted_score >= c["grade_b"]:    adjusted_grade = "B"
+    elif adjusted_score >= 45:              adjusted_grade = "C"
+    else:                                   adjusted_grade = "D"
+
+    return adjusted_score, gold_info, adjusted_grade, extra_warns
+
+def compute_lot(balance, risk_pct, sl_pips, symbol):
+    pip_val = {"USDJPY":9.1,"GBPJPY":9.1,"EURJPY":9.1,
+               "XAUUSD":10.0,"XTIUSD":10.0,
+               "BTCUSD":1.0,"ETHUSD":1.0}.get(norm(symbol),10.0)
+    pip_sz  = cfg(symbol).get("pip",0.0001)
+    if sl_pips <= 0: return 0.01
+    risk_amt = balance * risk_pct / 100
+    lot = risk_amt / (sl_pips * pip_val)
+    return round(max(0.01, min(lot, 100.0)), 2)
+
+@st.cache_data(ttl=300)   # 5 min — K-lines don't need to refresh every 15s
+def analyze_symbol(symbol, interval, bars, td_key):
+    """
+    Full analysis for one symbol.
+    Returns dict with df, df_h4, direction, score, grade, levels, session, warns.
+    """
+    try:
+        df   = add_indicators(fetch_bars(symbol, interval, bars, td_key))
+        df_h4= add_indicators(fetch_bars(symbol, "4h", 200, td_key))
+    except Exception as e:
+        return {"error": str(e), "symbol": symbol}
+
+    row      = df.iloc[-1]
+    close    = float(row["close"])
+    atr      = float(row.get("atr14", 0.001) or 0.001)
+    direction= determine_direction(df, df_h4, symbol)
+
+    score, bd, grade, warns = score_signal(df, df_h4, symbol, direction)
+
+    # ── Gold Engine overlay (XAUUSD only) ─────────────────────
+    gold_info = {}
+    if norm(symbol) == "XAUUSD":
+        score, gold_info, grade, gold_warns = gold_engine_score(
+            df, df_h4, direction, score, grade)
+        warns.extend(gold_warns)
+        bd["Gold Engine"] = gold_info.get("bonus", 0)
+
+    # ── Spike detection (same engine as backtest) ─────────────
+    spike_info = detect_spike(df, atr, symbol, lookback=5)
+    if spike_info["is_spike"]:
+        levels = spike_adjusted_levels(close, direction, atr, symbol, spike_info, df=df)
+    else:
+        levels = compute_levels(close, direction, atr, symbol, df=df)
+    sess_ok_, sess_name = session_ok(symbol)
+
+    rsi_val = float(row.get("rsi14",50) or 50)
+    macd_hist_val = float(row.get("macd_hist",0) or 0)
+    macd_val = float(row.get("macd",0) or 0)
+    ema20_val = float(row.get("ema20",close))
+    ema50_val = float(row.get("ema50",close))
+    ema200_val = float(row.get("ema200",close))
+    bb_upper = float(row.get("bb_upper",0) or 0)
+    bb_lower = float(row.get("bb_lower",0) or 0)
+
+    # ── GROK PRIMARY ANALYSIS ─────────────────────────────────
+    grok_result = None
+    xai_key = get_xai_key()
+    if xai_key:
+        try:
+            last_10 = df[["open","high","low","close"]].tail(10).round(cfg(symbol)["dec"]).to_string(index=False)
+            grok_result = grok_primary_analysis(
+                symbol=symbol, close=close, atr=atr, rsi=rsi_val,
+                macd_val=macd_val, macd_hist=macd_hist_val,
+                ema20=ema20_val, ema50=ema50_val, ema200=ema200_val,
+                h4_trend=_h4_trend(df_h4), session_name=sess_name,
+                calc_direction=direction, calc_score=score, calc_grade=grade,
+                sl_calc=levels["sl"], tp1_calc=levels["tp1"], tp2_calc=levels["tp2"],
+                last_10_bars_str=last_10, xai_key=xai_key,
+                bb_upper=bb_upper, bb_lower=bb_lower,
+            )
+        except Exception:
+            grok_result = None
+
+    return {
+        "symbol": symbol, "df": df, "df_h4": df_h4,
+        "close": close, "atr": atr,
+        "direction": direction, "score": score, "bd": bd, "grade": grade, "warns": warns,
+        "sl": levels["sl"], "tp1": levels["tp1"], "tp2": levels["tp2"],
+        "rr": levels["rr"], "sl_d": levels["sl_d"],
+        "rsi": rsi_val,
+        "macd_hist": macd_hist_val,
+        "ema20": ema20_val,
+        "ema50": ema50_val,
+        "ema200": ema200_val,
+        "session": sess_name, "session_ok": sess_ok_,
+        "h4_trend": _h4_trend(df_h4),
+        "spike": spike_info,
+        "gold": gold_info,
+        "grok": grok_result,  # Grok-primary AI analysis
+        "error": None,
+    }
+
+# ============================================================
+# TRADE JOURNAL
+# ============================================================
+def load_journal():
+    try:
+        if os.path.exists(JOURNAL_FILE):
+            with open(JOURNAL_FILE) as f: return json.load(f)
+    except: pass
+    return []
+
+def save_journal(journal):
+    try:
+        with open(JOURNAL_FILE,"w") as f: json.dump(journal, f, indent=2)
+    except: pass
+
+def log_trade(trade, exit_price, result, notes=""):
+    j = load_journal()
+    entry  = float(trade["entry"]); sl = float(trade["sl"])
+    ex     = float(exit_price)
+    risk   = abs(entry - sl)
+    dir_   = trade["direction"]
+    move   = (ex-entry) if dir_=="Buy" else (entry-ex)
+    pnl_r  = round(move/risk,2) if risk > 0 else 0
+    j.append({
+        "id": trade.get("id","?")[:6],
+        "ts": pd.Timestamp.utcnow().isoformat()[:16],
+        "symbol": trade.get("symbol","?"),
+        "direction": dir_, "entry": entry, "sl": sl,
+        "exit": ex, "lot": trade.get("lot",0.01),
+        "result": result, "pnl_r": pnl_r,
+        "grade": trade.get("locked_grade","?"),
+        "score": trade.get("locked_score",0),
+        "session": trade.get("session","?"),
+        "notes": notes,
+    })
+    save_journal(j)
+    return j
+
+def journal_stats(journal):
+    if not journal: return {}
+    total = len(journal); wins = sum(1 for t in journal if t.get("result")=="Win")
+    losses = sum(1 for t in journal if t.get("result")=="Loss")
+    bes    = sum(1 for t in journal if t.get("result")=="BE")
+    wr     = wins/total*100 if total else 0
+    all_r  = [t.get("pnl_r",0) for t in journal]
+    gross_p= sum(r for r in all_r if r>0)
+    gross_l= abs(sum(r for r in all_r if r<0))
+    pf     = gross_p/gross_l if gross_l>0 else 0
+    return {"total":total,"wins":wins,"losses":losses,"bes":bes,
+            "wr":wr,"total_r":sum(all_r),"avg_r":sum(all_r)/total if total else 0,
+            "pf":pf,"gross_p":gross_p,"gross_l":gross_l}
+
+# ============================================================
+# SHARED UI COMPONENTS
+# ============================================================
+def _prog_bar(pct, color="#00d4aa"):
+    f = max(0,min(int(pct),100))
     return (f"<div style='height:4px;background:rgba(255,255,255,0.08);border-radius:2px;margin-top:3px;'>"
-            f"<div style='width:{filled}%;height:100%;background:{color};border-radius:2px;'></div></div>")
+            f"<div style='width:{f}%;height:100%;background:{color};border-radius:2px;'></div></div>")
 
-def render_trade_tracker(plan: Plan, current_price: float, df: pd.DataFrame):
-    # ── Migrate old single active_trade → list ──────────────
-    if "active_trades" not in st.session_state:
-        old = st.session_state.pop("active_trade", None)
-        st.session_state.active_trades = [old] if old else []
-    trades = st.session_state.active_trades
+def _tp_pct(tp, entry, live, direction):
+    try:
+        tf=float(tp); e=float(entry)
+        total=abs(tf-e)
+        if total==0: return None
+        if direction=="Buy"  and tf<=e: return 0
+        if direction=="Sell" and tf>=e: return 0
+        done=(live-e) if direction=="Buy" else (e-live)
+        if done<=0: return 0
+        return min(int(done/total*100),100)
+    except: return None
 
-    # ── Title bar ──────────────────────────────────────────
-    n_trades = len(trades)
-    badge = (f" <span style='color:#00d4aa;font-size:11px;background:rgba(0,212,170,0.1);"
-             f"padding:2px 8px;border-radius:3px;'>{n_trades} open</span>") if n_trades else ""
+def render_grade_badge(grade, score=None):
+    gc = grade_color(grade)
+    sc = f" <span style='font-size:11px;color:#8b9ab0;'>({score})</span>" if score is not None else ""
     st.markdown(
-        f"<div style='background:#0d1117;border:1px solid rgba(255,255,255,0.07);"
-        f"border-radius:8px 8px 0 0;padding:10px 14px 6px;'>"
-        f"<div class='mono-title' style='margin-bottom:0;'>TRADE TRACKER{badge}</div></div>",
+        f"<div style='display:inline-block;background:rgba(255,255,255,0.05);border:1px solid {gc};"
+        f"border-radius:6px;padding:6px 16px;font-family:Space Mono,monospace;font-size:22px;"
+        f"font-weight:700;color:{gc};letter-spacing:.05em;'>{grade}{sc}</div>",
         unsafe_allow_html=True)
 
-    with st.container():
-        st.markdown("<div style='background:#0d1117;border:1px solid rgba(255,255,255,0.07);"
-                    "border-top:none;border-radius:0 0 8px 8px;padding:10px 14px 12px;margin-bottom:10px;'>",
-                    unsafe_allow_html=True)
+def render_direction_badge(direction):
+    if direction == "Buy":
+        color="#10b981"; bg="rgba(16,185,129,.12)"; border="rgba(16,185,129,.3)"
+    elif direction == "Sell":
+        color="#ef4444"; bg="rgba(239,68,68,.12)"; border="rgba(239,68,68,.3)"
+    else:
+        color="#f59e0b"; bg="rgba(245,158,11,.12)"; border="rgba(245,158,11,.3)"
+    st.markdown(
+        f"<div style='display:inline-block;background:{bg};border:1px solid {border};"
+        f"border-radius:8px;padding:8px 20px;font-family:Space Mono,monospace;font-size:14px;"
+        f"font-weight:700;color:{color};letter-spacing:.08em;'>{'▲ ' if direction=='Buy' else ('▼ ' if direction=='Sell' else '◈ ')}{direction.upper()}</div>",
+        unsafe_allow_html=True)
 
-        # ── Enter New Trade form (always visible) ──────────
-        with st.expander("▶ Enter New Trade", expanded=(n_trades == 0)):
-            c1, c2 = st.columns(2)
-            me = c1.number_input("Entry",     value=float(plan.entry or current_price), format="%.5f", key="te_e")
-            ms = c2.number_input("Stop Loss", value=float(plan.sl    or current_price), format="%.5f", key="te_s")
-            md = c1.selectbox("Direction", ["Buy","Sell"], index=0 if plan.direction=="Buy" else 1, key="te_d")
-            ml = c2.number_input("Lot", value=float(max(plan.suggested_lot, 0.01)), format="%.3f", key="te_l")
-            tp_default1 = float(plan.tp1) if plan.tp1 else float(current_price)
-            tp_default2 = float(plan.tp2) if plan.tp2 else float(current_price)
-            tc1, tc2 = st.columns(2)
-            mtp1 = tc1.number_input("Take Profit 1", value=tp_default1, format="%.5f", key="te_tp1")
-            mtp2 = tc2.number_input("Take Profit 2 (opt)", value=tp_default2, format="%.5f", key="te_tp2")
+def render_kv(label, value, color="#e8edf2"):
+    st.markdown(
+        f"<div class='kv'><span class='muted'>{label}</span>"
+        f"<span style='color:{color};font-family:Space Mono,monospace;font-size:12px;'>{value}</span></div>",
+        unsafe_allow_html=True)
 
-            # Validate direction vs TP before entering
-            _tp1_ok = (mtp1 > me and md=="Buy") or (mtp1 < me and md=="Sell") or mtp1==me
-            _sl_ok  = (ms  < me and md=="Buy") or (ms  > me and md=="Sell")
-            if not _tp1_ok:
-                st.warning(f"⚠ TP1 {fmt_price(mtp1,plan.symbol)} is on the wrong side for a {md}")
-            if not _sl_ok:
-                st.warning(f"⚠ SL {fmt_price(ms,plan.symbol)} is on the wrong side for a {md}")
+def render_score_breakdown(bd, score, grade):
+    gc = grade_color(grade)
+    html = (f"<div style='background:#0d1117;border:1px solid rgba(255,255,255,0.07);"
+            f"border-radius:8px;padding:12px 14px;'>"
+            f"<div class='mono-title'>SIGNAL SCORE</div>"
+            f"<div style='font-family:Space Mono,monospace;font-size:28px;font-weight:700;"
+            f"color:{gc};margin-bottom:10px;'>{score} <span style='font-size:14px;'>{grade}</span></div>")
+    maxes = {"H4 Trend":25,"EMA Stack":20,"Pullback":15,"MACD":15,"RSI":10,"Candle":10,"Session":5}
+    for k, v in bd.items():
+        mx  = maxes.get(k, 10)
+        pct = int(v/mx*100) if mx else 0
+        bar_col = "#00d4aa" if pct>=80 else "#f59e0b" if pct>=40 else "#ef4444"
+        html += (f"<div style='display:flex;align-items:center;gap:8px;margin:3px 0;font-size:11px;'>"
+                 f"<span style='color:#8b9ab0;width:70px;'>{k}</span>"
+                 f"<div style='background:#131a22;border-radius:3px;flex:1;height:5px;'>"
+                 f"<div style='width:{pct}%;height:100%;background:{bar_col};border-radius:3px;'></div></div>"
+                 f"<span style='color:{bar_col};width:28px;text-align:right;font-family:Space Mono,monospace;'>{v}</span></div>")
+    html += f"<div style='height:4px;background:#131a22;border-radius:2px;margin-top:8px;overflow:hidden;'><div style='width:{score}%;height:100%;background:{gc};border-radius:2px;'></div></div></div>"
+    st.markdown(html, unsafe_allow_html=True)
 
-            if st.button("▶ Enter Trade", key="btn_enter"):
-                import uuid
-                new_trade = {
-                    "id": str(uuid.uuid4())[:8],
-                    "symbol": plan.symbol,
-                    "entry": me, "sl": ms, "direction": md, "lot": ml,
-                    "tp1": mtp1, "tp2": mtp2,
-                    "locked_score": plan.setup_score,
-                    "locked_final": plan.final_score,
-                    "locked_grade": plan.setup_grade,
-                }
-                st.session_state.active_trades.append(new_trade)
-                st.success(f"Trade entered! ({plan.symbol} {md})"); st.rerun()
+def render_price_chart(df, symbol, entry=None, sl=None, tp1=None, tp2=None, title="PRICE CHART"):
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                        row_heights=[0.6,0.2,0.2],
+                        subplot_titles=["","MACD","RSI"],
+                        vertical_spacing=0.04)
+    # Candlestick
+    fig.add_trace(go.Candlestick(x=df["time"],open=df["open"],high=df["high"],
+                                  low=df["low"],close=df["close"],name="Price",
+                                  increasing_line_color="#10b981",decreasing_line_color="#ef4444"),row=1,col=1)
+    for col_, c_ in [("ema20","#f59e0b"),("ema50","#8b5cf6"),("ema200","#3b82f6")]:
+        if col_ in df.columns:
+            fig.add_trace(go.Scatter(x=df["time"],y=df[col_],name=col_.upper(),
+                                     line=dict(color=c_,width=1),opacity=0.8),row=1,col=1)
+    if "bb_upper" in df.columns:
+        for bk, bn in [("bb_upper","BB Upper"),("bb_lower","BB Lower")]:
+            fig.add_trace(go.Scatter(x=df["time"],y=df[bk],name=bn,
+                                     line=dict(color="#94a3b8",width=1,dash="dot"),opacity=0.5),row=1,col=1)
+    # Level lines
+    if entry: fig.add_hline(y=entry, line_color="#00d4aa", line_dash="dash", line_width=1, row=1, col=1)
+    if sl:    fig.add_hline(y=sl,    line_color="#ef4444", line_dash="dash", line_width=1, row=1, col=1)
+    if tp1:   fig.add_hline(y=tp1,   line_color="#10b981", line_dash="dash", line_width=1, row=1, col=1)
+    if tp2:   fig.add_hline(y=tp2,   line_color="#84cc16", line_dash="dot",  line_width=1, row=1, col=1)
+    # MACD
+    if "macd_hist" in df.columns:
+        colors_ = ["#10b981" if v>=0 else "#ef4444" for v in df["macd_hist"]]
+        fig.add_trace(go.Bar(x=df["time"],y=df["macd_hist"],name="MACD Hist",
+                             marker_color=colors_,opacity=0.8),row=2,col=1)
+        fig.add_trace(go.Scatter(x=df["time"],y=df.get("macd",df["macd_hist"]*0),
+                                 line=dict(color="#3b82f6",width=1),name="MACD"),row=2,col=1)
+    # RSI
+    if "rsi14" in df.columns:
+        fig.add_trace(go.Scatter(x=df["time"],y=df["rsi14"],
+                                 line=dict(color="#a78bfa",width=1.5),name="RSI"),row=3,col=1)
+        fig.add_hline(y=70, line_color="#ef4444", line_dash="dot", line_width=1, row=3, col=1)
+        fig.add_hline(y=30, line_color="#10b981", line_dash="dot", line_width=1, row=3, col=1)
+    fig.update_layout(
+        title=title, paper_bgcolor="#080c10", plot_bgcolor="#080c10",
+        font=dict(color="#e8edf2",size=11), height=520,
+        xaxis_rangeslider_visible=False, showlegend=True,
+        legend=dict(orientation="h",y=1.02,bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=0,r=0,t=30,b=0))
+    for axis in ["xaxis","yaxis","xaxis2","yaxis2","xaxis3","yaxis3"]:
+        fig.update_layout(**{axis:dict(gridcolor="rgba(255,255,255,0.05)",
+                                       zerolinecolor="rgba(255,255,255,0.1)")})
+    st.plotly_chart(fig, use_container_width=True)
 
-        # ── Active trade cards ─────────────────────────────
-        if not trades:
-            st.markdown("<div class='explainer-box' style='margin-top:8px;'>No open trades. Use the form above to enter one.</div>",
-                        unsafe_allow_html=True)
+# ============================================================
+# MULTI-TRADE TRACKER COMPONENT
+# ============================================================
+def render_trade_tracker(symbol, current_price, a=None, td_key=""):
+    """Renders Trade Tracker for a specific symbol. Returns (entry,sl,dir) of first active trade or None."""
+    if "active_trades" not in st.session_state:
+        st.session_state.active_trades = []
+
+    trades = st.session_state.active_trades
+    sym_trades = [t for t in trades if t.get("symbol","") == symbol]
+
+    st.markdown("<div class='panel'><div class='mono-title'>TRADE TRACKER</div>", unsafe_allow_html=True)
+
+    # ── Enter New Trade ──
+    with st.expander(f"▶ New Trade — {symbol}", expanded=(len(sym_trades)==0)):
+        # Try to use analysis for defaults
+        default_dir = a.get("direction","Buy") if a else "Buy"
+        default_entry= float(current_price)
+        # Recalculate levels using live price to prevent wrong-side SL/TP
+        if a and abs(float(current_price) - a.get("close", current_price)) > a.get("atr", 1) * 0.3:
+            _tracker_lvl = compute_levels(float(current_price), default_dir, a.get("atr", 0.001), symbol, df=a.get("df"))
+            default_sl  = float(_tracker_lvl["sl"])
+            default_tp1 = float(_tracker_lvl["tp1"])
+            default_tp2 = float(_tracker_lvl["tp2"])
         else:
-            for t in trades:
-                tid       = t.get("id","0")
-                t_sym     = t.get("symbol", plan.symbol)
-                t_dir     = t["direction"]
-                t_entry   = float(t["entry"])
-                t_sl      = float(t["sl"])
-                t_risk    = abs(t_entry - t_sl)
-                t_tp1     = t.get("tp1"); t_tp2 = t.get("tp2")
-                dir_col   = "#10b981" if t_dir=="Buy" else "#ef4444"
-                gc2       = grade_color(t["locked_grade"])
+            default_sl   = float(a.get("sl", current_price)) if a else float(current_price)
+            default_tp1  = float(a.get("tp1",current_price)) if a else float(current_price)
+            default_tp2  = float(a.get("tp2",current_price)) if a else float(current_price)
 
-                # Live price — always use the TRADE's own symbol
-                _ma_tick  = fetch_mt5_price(t_sym, get_ma_token(), get_ma_account()) if (get_ma_token() and get_ma_account()) else None
-                if _ma_tick:
-                    t_price      = _ma_tick["bid"]
-                    price_label  = f"MT5 {fmt_price(_ma_tick['bid'],t_sym)}/{fmt_price(_ma_tick['ask'],t_sym)}"
-                    price_col    = "#00d4aa"
-                else:
-                    t_price      = current_price if t_sym == plan.symbol else t_entry
-                    price_label  = "TD ~" if t_sym == plan.symbol else "⚠ no price"
-                    price_col    = "#f59e0b"
+        c1,c2 = st.columns(2)
+        me  = c1.number_input("Entry",     value=default_entry, format=f"%.{cfg(symbol)['dec']}f", key=f"te_e_{symbol}")
+        ms  = c2.number_input("Stop Loss", value=default_sl,    format=f"%.{cfg(symbol)['dec']}f", key=f"te_s_{symbol}")
+        md  = c1.selectbox("Direction",["Buy","Sell"],index=0 if default_dir=="Buy" else 1,key=f"te_d_{symbol}")
+        ml  = c2.number_input("Lot",value=0.01,format="%.2f",key=f"te_l_{symbol}")
+        tc1,tc2 = st.columns(2)
+        mt1 = tc1.number_input("TP1",value=default_tp1,format=f"%.{cfg(symbol)['dec']}f",key=f"te_t1_{symbol}")
+        mt2 = tc2.number_input("TP2",value=default_tp2,format=f"%.{cfg(symbol)['dec']}f",key=f"te_t2_{symbol}")
 
-                # Direction-aware P&L
-                _move  = (t_price - t_entry) if t_dir=="Buy" else (t_entry - t_price)
-                _pnl_r = _move / t_risk if t_risk > 0 else 0
-                pnl_col = "#10b981" if _pnl_r >= 0 else "#ef4444"
+        # Validation warnings
+        sl_ok  = (ms<me and md=="Buy") or (ms>me and md=="Sell")
+        tp1_ok = (mt1>me and md=="Buy") or (mt1<me and md=="Sell")
+        if not sl_ok:  st.warning(f"⚠ SL is on wrong side for {md}")
+        if not tp1_ok: st.warning(f"⚠ TP1 is on wrong side for {md}")
 
-                # Direction-aware TP progress
-                tp1_pct = _tp_pct_dir(t_tp1, t_entry, t_price, t_dir)
-                tp2_pct = _tp_pct_dir(t_tp2, t_entry, t_price, t_dir)
-                tp1_bar = _prog_bar_html(tp1_pct, "#10b981") if tp1_pct is not None else ""
-                tp2_bar = _prog_bar_html(tp2_pct, "#00d4aa") if tp2_pct is not None else ""
+        if st.button("▶ Enter Trade", key=f"btn_enter_{symbol}"):
+            # ── Validate trade before saving ──────────────────
+            _valid = True
+            if md == "Buy":
+                if ms >= me: st.error("SL must be BELOW entry for Buy"); _valid = False
+                if mt1 <= me: st.error("TP1 must be ABOVE entry for Buy"); _valid = False
+            else:
+                if ms <= me: st.error("SL must be ABOVE entry for Sell"); _valid = False
+                if mt1 >= me: st.error("TP1 must be BELOW entry for Sell"); _valid = False
+            if _valid:
+                grade_lock = a.get("grade","?") if a else "?"
+                score_lock = a.get("score",0)   if a else 0
+                sess_lock  = a.get("session","?") if a else "?"
+                st.session_state.active_trades.append({
+                    "id": str(uuid.uuid4())[:8], "symbol": symbol,
+                    "entry":me,"sl":ms,"direction":md,"lot":ml,"tp1":mt1,"tp2":mt2,
+                    "locked_grade":grade_lock,"locked_score":score_lock,"session":sess_lock,
+                })
+                st.success(f"Trade entered: {symbol} {md}"); st.rerun()
 
-                # Card header with symbol tag
-                sym_tag = (f"<span style='color:#00d4aa;font-size:10px;background:rgba(0,212,170,0.1);"
-                           f"padding:2px 7px;border-radius:3px;margin-right:6px;'>{t_sym}</span>")
+    # ── Active trade cards ──
+    if not sym_trades:
+        st.markdown("<div style='font-size:12px;color:#4a5568;padding:8px 0;'>No open trades for this symbol.</div>", unsafe_allow_html=True)
+    else:
+        for t in sym_trades:
+            tid   = t.get("id","0")
+            t_dir = t["direction"]
+            t_e   = float(t["entry"]); t_sl  = float(t["sl"])
+            t_risk= abs(t_e-t_sl)
+            dc    = "#10b981" if t_dir=="Buy" else "#ef4444"
+            gc_   = grade_color(t.get("locked_grade","?"))
+
+            # Live price (always for this trade's symbol)
+            tick = fetch_mt5_price(symbol, get_ma_token_price(), get_ma_account_price()) if (get_ma_token_price() and get_ma_account_price()) else None
+            live = tick["bid"] if tick else current_price
+            plabel = f"MT5 {fmt_price(live,symbol)}" if tick else "TD~"
+            pcol   = "#00d4aa" if tick else "#f59e0b"
+
+            # P&L (direction-aware)
+            move   = (live-t_e) if t_dir=="Buy" else (t_e-live)
+            pnl_r  = move/t_risk if t_risk>0 else 0
+            pnl_c  = "#10b981" if pnl_r>=0 else "#ef4444"
+
+            tp1_p  = _tp_pct(t.get("tp1"), t_e, live, t_dir)
+            tp2_p  = _tp_pct(t.get("tp2"), t_e, live, t_dir)
+
+            st.markdown(
+                f"<div style='border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:8px 10px;margin:5px 0;background:#090e14;'>"
+                f"<div style='font-size:10px;color:#8b9ab0;margin-bottom:5px;'>"
+                f"<b style='color:{dc};'>{t_dir}</b>  ·  {t.get('lot',0)} lot  "
+                f"<span style='color:{gc_};'>{t.get('locked_grade','?')}</span>  "
+                f"<span style='float:right;font-size:9px;color:#4a5568;'>#{tid}</span></div>"
+                f"<div style='display:flex;gap:10px;flex-wrap:wrap;font-size:12px;margin-bottom:5px;'>"
+                f"<div><span class='muted'>Entry</span><br><b style='color:#00d4aa;font-family:Space Mono,monospace;'>{fmt_price(t_e,symbol)}</b></div>"
+                f"<div><span class='muted'>SL</span><br><b style='color:#ef4444;font-family:Space Mono,monospace;'>{fmt_price(t_sl,symbol)}</b></div>"
+                f"<div><span class='muted'>P&L <span style='font-size:9px;color:{pcol};'>({plabel})</span></span><br>"
+                f"<b style='color:{pnl_c};font-family:Space Mono,monospace;'>{pnl_r:+.2f}R</b></div></div>"
+                f"<div style='display:flex;gap:10px;font-size:11px;'>"
+                f"<div style='flex:1;'><span class='muted'>TP1</span> <b style='color:#10b981;font-family:Space Mono,monospace;'>{fmt_price(t.get('tp1'),symbol)}</b>"
+                + (f" <span style='color:#8b9ab0;font-size:9px;'>{tp1_p}%</span>{_prog_bar(tp1_p,'#10b981')}" if tp1_p is not None else "") +
+                f"</div><div style='flex:1;'><span class='muted'>TP2</span> <b style='color:#00d4aa;font-family:Space Mono,monospace;'>{fmt_price(t.get('tp2'),symbol)}</b>"
+                + (f" <span style='color:#8b9ab0;font-size:9px;'>{tp2_p}%</span>{_prog_bar(tp2_p,'#00d4aa')}" if tp2_p is not None else "") +
+                f"</div></div></div>", unsafe_allow_html=True)
+
+            # ── SL Proximity danger warning ──────────────────────
+            sl_dist   = abs(live - t_sl)
+            sl_total  = abs(t_e  - t_sl)
+            sl_pct    = (sl_dist / sl_total * 100) if sl_total > 0 else 100
+            sl_pips   = round(sl_dist / cfg(symbol).get("pip", 0.0001), 1)
+            if sl_pct <= 30:
+                sl_pct_int = int(sl_pct)
                 st.markdown(
-                    f"<div style='border:1px solid rgba(255,255,255,0.07);border-radius:6px;"
-                    f"padding:8px 10px;margin:6px 0;background:#090e14;'>"
-                    f"<div style='font-size:10px;color:#8b9ab0;margin-bottom:6px;'>{sym_tag}"
-                    f"<span style='color:{dir_col};font-weight:700;'>{t_dir}</span>"
-                    f"<span style='color:#4a5568;'> · {t['lot']} lot</span>"
-                    f"<span style='color:#4a5568;float:right;font-size:9px;'>#{tid}</span></div>"
-                    # Row 1: Entry / SL / P&L / Grade
-                    f"<div style='display:flex;gap:10px;flex-wrap:wrap;font-size:12px;margin-bottom:5px;'>"
-                    f"<div><span class='muted'>Entry</span><br>"
-                    f"<b style='color:#00d4aa;font-family:Space Mono,monospace;'>{fmt_price(t_entry,t_sym)}</b></div>"
-                    f"<div><span class='muted'>SL</span><br>"
-                    f"<b style='color:#ef4444;font-family:Space Mono,monospace;'>{fmt_price(t_sl,t_sym)}</b></div>"
-                    f"<div><span class='muted'>P&L <span style='font-size:9px;color:{price_col};'>({price_label})</span></span><br>"
-                    f"<b style='color:{pnl_col};font-family:Space Mono,monospace;'>{_pnl_r:+.2f}R</b></div>"
-                    f"<div><span class='muted'>Grade</span><br>"
-                    f"<b style='color:{gc2};'>{t['locked_grade']} {t['locked_final']}</b></div></div>"
-                    # Row 2: TP1 + TP2 with progress
-                    f"<div style='display:flex;gap:10px;flex-wrap:wrap;font-size:11px;margin-bottom:4px;'>"
-                    f"<div style='flex:1;min-width:90px;'><span class='muted'>TP1</span> "
-                    f"<b style='color:#10b981;font-family:Space Mono,monospace;'>{fmt_price(t_tp1,t_sym) if t_tp1 else '—'}</b>"
-                    + (f" <span style='color:#8b9ab0;font-size:9px;'>{tp1_pct}%</span>{tp1_bar}" if tp1_pct is not None else "") +
-                    f"</div>"
-                    f"<div style='flex:1;min-width:90px;'><span class='muted'>TP2</span> "
-                    f"<b style='color:#00d4aa;font-family:Space Mono,monospace;'>{fmt_price(t_tp2,t_sym) if t_tp2 else '—'}</b>"
-                    + (f" <span style='color:#8b9ab0;font-size:9px;'>{tp2_pct}%</span>{tp2_bar}" if tp2_pct is not None else "") +
-                    f"</div></div></div>",
-                    unsafe_allow_html=True)
+                    f"<div style='background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.5);"
+                    f"border-left:3px solid #ef4444;border-radius:6px;padding:7px 10px;margin:5px 0;"
+                    f"animation:alertpulse 1.5s infinite;font-size:11px;color:#fca5a5;font-family:Space Mono,monospace;'>"
+                    f"🚨 SL DANGER — Price is {sl_pips:.1f} pips from SL "
+                    f"({sl_pct_int}% of SL distance remaining). Consider EXIT or MOVE SL.</div>",
+                    unsafe_allow_html=True
+                )
+                # Browser alert — fire once when entering danger zone
+                _dng_key = f"_danger_alerted_{tid}"
+                if not st.session_state.get(_dng_key):
+                    fire_danger_alert(symbol, sl_pips, sl_pct)
+                    st.session_state[_dng_key] = True
+            elif sl_pct <= 50:
+                st.markdown(
+                    f"<div style='background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.3);"
+                    f"border-left:3px solid #f59e0b;border-radius:6px;padding:6px 10px;margin:5px 0;"
+                    f"font-size:11px;color:#fcd34d;font-family:Space Mono,monospace;'>"
+                    f"⚠ SL ALERT — {sl_pips:.1f} pips from SL ({int(sl_pct)}% remaining). Stay alert.</div>",
+                    unsafe_allow_html=True
+                )
+            else:
+                # Price recovered — reset danger alert so it fires again if it returns
+                st.session_state.pop(f"_danger_alerted_{tid}", None)
 
-                # ── Close flow (per-trade key) ──
-                _close_key = f"_closing_{tid}"
-                if not st.session_state.get(_close_key):
-                    if st.button(f"✕ Close  #{tid}", key=f"btn_close_{tid}"):
-                        st.session_state[_close_key] = True; st.rerun()
+            # ── TP1 hit alert ─────────────────────────────────────
+            t_tp1_val = t.get("tp1"); t_tp2_val = t.get("tp2")
+            if t_tp1_val:
+                try:
+                    _tp1f = float(t_tp1_val)
+                    _tp1_hit = (t_dir == "Buy" and live >= _tp1f) or \
+                               (t_dir == "Sell" and live <= _tp1f)
+                    _tp1_alert_key = f"_tp1_hit_{tid}"
+                    if _tp1_hit and not st.session_state.get(_tp1_alert_key):
+                        fire_tp_alert(symbol, "TP1", fmt_price(_tp1f, symbol),
+                                      fmt_price(float(t_tp2_val), symbol) if t_tp2_val else None)
+                        st.session_state[_tp1_alert_key] = True
+                        st.markdown(
+                            f"<div style='background:rgba(16,185,129,0.12);border:1px solid #10b981;"
+                            f"border-left:3px solid #10b981;border-radius:6px;padding:8px 12px;margin:6px 0;"
+                            f"font-size:12px;color:#6ee7b7;font-family:Space Mono,monospace;animation:alertpulse 1.5s 3;'>"
+                            f"🎯 TP1 HIT! Consider taking profit or trailing SL to TP2 @ {fmt_price(float(t_tp2_val), symbol) if t_tp2_val else '—'}"
+                            f"</div>", unsafe_allow_html=True)
+                except Exception:
+                    pass
+
+            # ── AI advisor button & response ──────────────────────
+            ai_key   = f"_ai_advice_{tid}"
+            btn_col, _ = st.columns([1, 3])
+            with btn_col:
+                if st.button("🤖 Ask AI", key=f"btn_ai_{tid}", help="Get HOLD / EXIT / MOVE SL recommendation from Grok"):
+                    with st.spinner("Asking Grok…"):
+                        advice = get_ai_trade_advice(
+                            t, live,
+                            a if a else {},
+                            st.session_state.get("last_news_{}".format(symbol), {})
+                        )
+                    st.session_state[ai_key] = advice
+
+            if st.session_state.get(ai_key):
+                adv_text = st.session_state[ai_key]
+                # Choose colour hint based on action word
+                adv_upper = adv_text.upper()
+                if "EXIT NOW" in adv_upper or "EXIT" in adv_upper[:60]:
+                    adv_border = "#ef4444"; adv_bg = "rgba(239,68,68,0.07)"
+                elif "MOVE SL" in adv_upper or "BREAKEVEN" in adv_upper:
+                    adv_border = "#f59e0b"; adv_bg = "rgba(245,158,11,0.07)"
+                elif "PARTIAL" in adv_upper:
+                    adv_border = "#a78bfa"; adv_bg = "rgba(167,139,250,0.07)"
                 else:
-                    st.markdown(f"<div style='font-size:11px;color:#f59e0b;font-family:Space Mono,monospace;margin-bottom:4px;'>LOG TRADE #{tid} ({t_sym})</div>",
-                                unsafe_allow_html=True)
-                    _ep  = st.number_input("Exit Price", value=float(t_price), format="%.5f", key=f"j_exit_{tid}")
-                    _res = st.selectbox("Result", ["Win","Loss","BE"], key=f"j_res_{tid}")
-                    _note= st.text_input("Notes", placeholder="e.g. news spike, TP1 hit...", key=f"j_note_{tid}")
-                    cj1, cj2 = st.columns(2)
-                    if cj1.button("💾 Save & Close", key=f"btn_save_{tid}"):
-                        log_trade(t, plan, _ep, _res, _note)
-                        st.session_state.active_trades = [x for x in st.session_state.active_trades if x.get("id") != tid]
-                        st.session_state.pop(_close_key, None)
-                        st.session_state.pop("_last_alert_hash", None)
-                        st.success(f"Trade #{tid} logged!"); st.rerun()
-                    if cj2.button("Cancel", key=f"btn_cancel_{tid}"):
-                        st.session_state.pop(_close_key, None); st.rerun()
+                    adv_border = "#6366f1"; adv_bg = "rgba(99,102,241,0.07)"
+                st.markdown(
+                    f"<div style='background:{adv_bg};border:1px solid {adv_border}44;"
+                    f"border-left:3px solid {adv_border};border-radius:8px;"
+                    f"padding:10px 13px;margin:4px 0 8px;font-size:12px;color:#c7d2fe;line-height:1.75;'>"
+                    f"<span style='font-size:10px;color:{adv_border};font-family:Space Mono,monospace;"
+                    f"letter-spacing:.08em;'>🤖 GROK ADVISOR</span><br><br>"
+                    + adv_text.replace("\n","<br>") +
+                    f"</div>", unsafe_allow_html=True
+                )
+                clr_col, _ = st.columns([1, 4])
+                with clr_col:
+                    if st.button("✕ Clear advice", key=f"btn_ai_clr_{tid}"):
+                        st.session_state.pop(ai_key, None); st.rerun()
 
-                st.markdown("<hr style='border-color:rgba(255,255,255,0.04);margin:4px 0;'>", unsafe_allow_html=True)
+            ck = f"_closing_{tid}"
+            if not st.session_state.get(ck):
+                if st.button(f"✕ Close #{tid}", key=f"btn_cl_{tid}"):
+                    st.session_state[ck] = True; st.rerun()
+            else:
+                st.markdown(f"<div style='font-size:11px;color:#f59e0b;font-family:Space Mono,monospace;margin:4px 0;'>LOG TRADE #{tid}</div>", unsafe_allow_html=True)
+                ep   = st.number_input("Exit Price", value=float(live), format=f"%.{cfg(symbol)['dec']}f", key=f"j_ep_{tid}")
+                res  = st.selectbox("Result",["Win","Loss","BE"],key=f"j_res_{tid}")
+                note = st.text_input("Notes",key=f"j_note_{tid}",placeholder="e.g. news spike, early exit...")
+                cc1,cc2 = st.columns(2)
+                if cc1.button("💾 Save & Close", key=f"btn_sc_{tid}"):
+                    log_trade(t, ep, res, note)
+                    st.session_state.active_trades = [x for x in st.session_state.active_trades if x.get("id")!=tid]
+                    st.session_state.pop(ck,None)
+                    st.success("Trade logged!"); st.rerun()
+                if cc2.button("Cancel", key=f"btn_cc_{tid}"):
+                    st.session_state.pop(ck,None); st.rerun()
 
-        st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    # Return the trade matching the currently viewed symbol (for Live Health)
-    for t in trades:
-        if t.get("symbol", plan.symbol) == plan.symbol:
-            return t["entry"], t["sl"], t["direction"]
-    # Fallback: return first trade if any (so Live Health still shows something)
-    if trades:
-        return trades[0]["entry"], trades[0]["sl"], trades[0]["direction"]
+    if sym_trades:
+        t0 = sym_trades[0]
+        return t0["entry"], t0["sl"], t0["direction"]
     return None
 
 # ============================================================
-# TRADE JOURNAL  — persistent JSON log + self-learning stats
+# AUTO PRE-MARKET / DAILY BIAS (Grok)
 # ============================================================
-JOURNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_journal.json")
-
-def load_journal() -> List[dict]:
+@st.cache_data(ttl=3600)  # 1-hour cache — auto-refreshes each hour
+def _auto_premarket_bias(xai_key: str, symbols_csv: str, cal_text: str, hist_text: str):
+    """
+    Auto-generate per-symbol bias using Grok.
+    Returns dict like {"EURUSD": {"bias":"bull","conf":"HIGH","note":"..."}, ...}
+    Cached 1 hour so it doesn't spam the API.
+    """
+    now_utc = pd.Timestamp.utcnow()
+    msg = (
+        f"QUICK MARKET BIAS — {now_utc.strftime('%Y-%m-%d %H:%M UTC')} ({now_utc.strftime('%A')})\n"
+        f"Symbols: {symbols_csv}\n"
+    )
+    if cal_text:
+        msg += f"\nUPCOMING EVENTS:\n{cal_text}\n"
+    if hist_text:
+        msg += f"\nTRADER PERFORMANCE:\n{hist_text}\n"
+    msg += (
+        f"\nFor EACH symbol return a JSON object with:\n"
+        f'  "SYM": {{"bias":"bull|bear|neutral","conf":"HIGH|MED|LOW","note":"<12 words max>"}}\n'
+        f"Return ONLY a single JSON object containing all symbols. No markdown.\n"
+        f"Base your bias on: current trends, upcoming events, session timing, and the trader's personal data."
+    )
+    raw = _grok([
+        {"role":"system","content":"You are a forex analyst. Return ONLY valid JSON. "
+         f"UTC: {now_utc.strftime('%Y-%m-%d %H:%M')}"},
+        {"role":"user","content":msg}
+    ], max_tokens=600, temperature=0.1, api_key=xai_key)
+    if not raw or raw.startswith("[Grok"):
+        return {}
     try:
-        if os.path.exists(JOURNAL_FILE):
-            with open(JOURNAL_FILE,"r") as f: return json.load(f)
-    except Exception: pass
-    return []
+        return json.loads(re.sub(r"```json|```","",raw).strip())
+    except Exception:
+        return {}
 
-def save_journal(journal: List[dict]):
-    try:
-        with open(JOURNAL_FILE,"w") as f: json.dump(journal, f, indent=2)
-    except Exception: pass
+def _get_premarket_data():
+    """Gather calendar + history data and call auto bias. Returns bias dict."""
+    xai_key = get_xai_key()
+    if not xai_key:
+        return {}
+    # Economic calendar
+    cal_text = ""
+    te_key = get_te_key()
+    if te_key:
+        events = fetch_te_calendar(te_key)
+        if events:
+            lines = []
+            for e in events[:15]:
+                imp = "HIGH" if e["importance"]=="HIGH" else e["importance"]
+                lines.append(f"  {e['date'].strftime('%a %H:%M')} [{e['country'].title()}] [{imp}] {e['event']}")
+            cal_text = "\n".join(lines)
+    # Trader history
+    hist_text = ""
+    if _sb_ok():
+        journal = sb_get("journal", "order=closed_at.desc&limit=50")
+        if journal:
+            df_j = pd.DataFrame(journal)
+            df_j["pnl_r"] = pd.to_numeric(df_j["pnl_r"], errors="coerce").fillna(0)
+            try:
+                by_sym = df_j.groupby("symbol").agg(
+                    trades=("pnl_r","count"),
+                    wr=("outcome", lambda x: f"{(x=='WIN').sum()}/{len(x)}"),
+                    avg_r=("pnl_r","mean")
+                ).round(2)
+                hist_text = by_sym.to_string()
+            except Exception:
+                pass
+    return _auto_premarket_bias(xai_key, ",".join(ACTIVE_SYMBOLS), cal_text, hist_text)
 
-def log_trade(trade: dict, plan: "Plan", exit_price: float, result: str,
-              notes: str = "") -> List[dict]:
-    """Append a closed trade. result = 'Win'|'Loss'|'BE'"""
-    from datetime import datetime as _dt
-    entry_p = float(trade["entry"]); sl_p = float(trade["sl"])
-    risk_dist = abs(entry_p - sl_p)
-    gain_dist = abs(exit_price - entry_p) if exit_price else 0
-    direction = trade["direction"]
-    # R-multiple: positive = profit direction, negative = against
-    if direction == "Buy":
-        pnl_r = (exit_price - entry_p) / risk_dist if risk_dist > 0 else 0
+# ============================================================
+# PAGE 1 — MARKET OVERVIEW
+# ============================================================
+def page_overview():
+    st.markdown("<div style='font-family:Space Mono,monospace;font-size:18px;color:#00d4aa;letter-spacing:.12em;padding:4px 0 16px;'>◈ MARKET OVERVIEW</div>", unsafe_allow_html=True)
+
+    td_key = get_td_key()
+    if not td_key:
+        st.warning("⚠ Add your Twelve Data API key in the sidebar to load analysis.")
+        return
+
+    # AI Market Bias removed — Grok Primary Analysis now covers fundamentals
+    # in its unified signal output (no more separate bias badges that can conflict)
+
+    interval = st.session_state.get("ov_interval","15min")
+    cols = st.columns(3)
+
+    for i, sym in enumerate(ACTIVE_SYMBOLS):
+        is_open, mkt = market_is_open(sym)
+        with cols[i % 3]:
+            with st.spinner(f"Loading {sym}..."):
+                a = analyze_symbol(sym, interval, 400, td_key)
+            if a.get("error"):
+                st.error(f"{sym}: {a['error']}")
+                continue
+            gc   = grade_color(a["grade"])
+            dc   = "#10b981" if a["direction"]=="Buy" else ("#ef4444" if a["direction"]=="Sell" else "#f59e0b")
+            mkt_col = "#10b981" if mkt in ("LIVE","24/7") else "#f59e0b"
+            sess_col= "#10b981" if a["session_ok"] else "#4a5568"
+            # MT5 price if available
+            tick = fetch_mt5_price(sym, get_ma_token_price(), get_ma_account_price())
+            price = tick["bid"] if tick else a["close"]
+            price_src = "MT5" if tick else "TD"
+
+            # Spike alert for this symbol
+            sp_info = a.get("spike", {})
+            spike_html = ""
+            if sp_info.get("is_spike"):
+                sp_lvl = sp_info["alert_level"]
+                sp_col = "#ef4444" if sp_lvl == "danger" else ("#f59e0b" if sp_lvl == "warning" else "#a78bfa")
+                sp_bg  = "rgba(239,68,68,0.1)" if sp_lvl == "danger" else ("rgba(245,158,11,0.1)" if sp_lvl == "warning" else "rgba(167,139,250,0.1)")
+                spike_html = (
+                    f"<div style='background:{sp_bg};border:1px solid {sp_col}44;border-radius:4px;"
+                    f"padding:3px 8px;font-size:10px;color:{sp_col};font-family:Space Mono,monospace;"
+                    f"margin-top:4px;'>{sp_info['message']}</div>")
+
+            # ── AI data ───────────────────────────────────────────
+            grok = a.get("grok")
+            if grok and not grok.get("error"):
+                grok_ai_r = grok.get("ai_rating", 0)
+                ai_dir = grok.get("direction", a["direction"])
+                ai_action = grok.get("action", "WAIT")
+                ai_conf = grok.get("confidence", "LOW")
+                # News impact
+                news_html = ""
+                news_imp = grok.get("news_impact","")
+                if news_imp:
+                    news_html = f"<div style='font-size:10px;color:#a78bfa;margin-top:4px;font-family:Space Mono,monospace;'>📰 {news_imp}</div>"
+                # Risk warning
+                risk_html = ""
+                risk_warn = grok.get("risk_warning","")
+                if risk_warn and risk_warn.lower() != "none":
+                    risk_html = f"<div style='font-size:10px;color:#f59e0b;margin-top:3px;font-family:Space Mono,monospace;'>⚠ {risk_warn}</div>"
+            else:
+                # Fallback: no Grok data
+                grok_ai_r = 0
+                ai_dir = a["direction"]
+                ai_action = a["direction"]
+                ai_conf = ""
+                news_html = ""
+                risk_html = ""
+
+            st.markdown(
+                f"<div style='background:#0d1117;border:1px solid {'rgba(239,68,68,0.3)' if sp_info.get('alert_level') == 'danger' else 'rgba(255,255,255,0.07)'};border-radius:10px;"
+                f"padding:14px 16px;margin-bottom:12px;cursor:pointer;"
+                f"{'animation:alertpulse 2s infinite;' if sp_info.get('alert_level') == 'danger' else ''}'>"
+                # Header: Symbol + Market status
+                f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;'>"
+                f"<span style='font-family:Space Mono,monospace;font-size:14px;font-weight:700;color:#e8edf2;'>{sym}</span>"
+                f"<span style='font-size:10px;color:{mkt_col};font-family:Space Mono,monospace;'>{mkt}</span></div>"
+                # Price
+                f"<div style='font-family:Space Mono,monospace;font-size:20px;font-weight:700;color:#e8edf2;margin-bottom:8px;'>{fmt_price(price,sym)}"
+                f"<span style='font-size:10px;color:#4a5568;margin-left:4px;'>{price_src}</span></div>"
+                # Score + Grade + Direction
+                f"<div style='display:flex;gap:8px;align-items:center;margin-bottom:6px;'>"
+                f"<span style='font-family:Space Mono,monospace;font-size:22px;font-weight:900;color:{gc};"
+                f"background:rgba(255,255,255,0.04);padding:2px 12px;border-radius:6px;border:2px solid {gc};'>"
+                f"{a['grade']} ({a['score']})</span>"
+                f"<span style='font-family:Space Mono,monospace;font-size:13px;font-weight:700;color:{dc};'>"
+                f"{'▲' if a['direction']=='Buy' else ('▼' if a['direction']=='Sell' else '◈')} {a['direction']}</span>"
+                f"<span style='font-size:10px;color:#8b9ab0;font-family:Space Mono,monospace;'>AI {grok_ai_r}/10</span>"
+                f"</div>"
+                # Technicals row
+                f"<div style='display:flex;gap:12px;font-size:11px;'>"
+                f"<span style='color:#8b9ab0;'>H4: <span style='color:#e8edf2;'>{a['h4_trend']}</span></span>"
+                f"<span style='color:#8b9ab0;'>RSI: <span style='color:#e8edf2;'>{fmt_num(a['rsi'],1)}</span></span>"
+                f"<span style='color:{sess_col};'>{a['session']}</span></div>"
+                # Levels row
+                f"<div style='display:flex;gap:12px;font-size:11px;margin-top:4px;'>"
+                f"<span class='muted'>SL <b style='color:#ef4444;'>{fmt_price(a['sl'],sym)}</b></span>"
+                f"<span class='muted'>TP1 <b style='color:#10b981;'>{fmt_price(a['tp1'],sym)}</b></span>"
+                f"<span class='muted'>R:R <b style='color:#a78bfa;'>{fmt_num(a['rr'],1)}:1</b></span></div>"
+                + news_html + risk_html + spike_html +
+                f"</div>",
+                unsafe_allow_html=True)
+            if a["warns"]:
+                for w in a["warns"][:2]:
+                    st.markdown(f"<div style='font-size:10px;color:#f59e0b;margin:-8px 0 6px;padding-left:2px;'>{w}</div>", unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown("<div style='font-size:11px;color:#4a5568;font-family:Space Mono,monospace;'>Grades use H4-first scoring · AI bias auto-updates hourly · ATR-based SL/TP per asset class</div>", unsafe_allow_html=True)
+
+# ============================================================
+# PAGE 2 — SYMBOL PAGE
+# ============================================================
+def page_symbol(symbol):
+    cfg_ = SYMBOL_CONFIG[symbol]
+    td_key = get_td_key()
+    is_open, mkt = market_is_open(symbol)
+
+    st.markdown(f"<div style='font-family:Space Mono,monospace;font-size:16px;color:#00d4aa;letter-spacing:.1em;padding:4px 0 12px;'>◈ {cfg_['name']} — {symbol}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='font-size:11px;color:#8b9ab0;margin-bottom:12px;font-family:Space Mono,monospace;'>{cfg_['note']}</div>", unsafe_allow_html=True)
+
+    # Interval selector — Gold defaults to 5 Min for scalping
+    _default_int = 0 if norm(symbol) == "XAUUSD" else 1
+    int_col, _, __ = st.columns([1,2,2])
+    with int_col:
+        int_label = st.selectbox("Interval", list(INTERVAL_OPTIONS.keys()),
+                                 index=_default_int, key=f"int_{symbol}")
+    interval = INTERVAL_OPTIONS[int_label]
+    bars = 400
+
+    if not td_key:
+        st.warning("⚠ Add your Twelve Data API key in the sidebar.")
+        return
+
+    with st.spinner(f"Loading {symbol} data..."):
+        a = analyze_symbol(symbol, interval, bars, td_key)
+
+    if a.get("error"):
+        st.error(f"Error loading {symbol}: {a['error']}")
+        return
+
+    # MT5 live price
+    tick  = fetch_mt5_price(symbol, get_ma_token_price(), get_ma_account_price())
+    price = tick["bid"] if tick else a["close"]
+
+    # ── Recalculate SL/TP if live price differs from cached close ──
+    # This prevents SL/TP from being on the wrong side when price moves
+    _price_drift = abs(price - a["close"])
+    if _price_drift > a["atr"] * 0.3:  # Significant price change since cache
+        _live_levels = compute_levels(price, a["direction"], a["atr"], symbol, df=a["df"])
+        a["sl"]   = _live_levels["sl"]
+        a["tp1"]  = _live_levels["tp1"]
+        a["tp2"]  = _live_levels["tp2"]
+        a["rr"]   = _live_levels["rr"]
+        a["sl_d"] = _live_levels["sl_d"]
+
+    # ── Top bar ──────────────────────────────────────────────
+    t1, t2, t3, t4 = st.columns([2,3,2,1])
+    with t1: render_direction_badge(a["direction"])
+    with t2:
+        pc = "#10b981" if price >= a["close"] else "#ef4444"
+        chg = price - a["close"]
+        price_src = f"MT5 {fmt_price(tick['bid'],symbol)}/{fmt_price(tick['ask'],symbol)}" if tick else "Twelve Data"
+        st.markdown(
+            f"<div style='font-family:Space Mono,monospace;font-size:22px;font-weight:700;padding-top:4px;'>"
+            f"{fmt_price(price,symbol)}"
+            f"<span style='font-size:12px;color:{pc};'> {chg:+.{cfg_['dec']}f}</span>"
+            f"<span style='font-size:10px;color:#4a5568;margin-left:8px;'>{price_src}</span></div>",
+            unsafe_allow_html=True)
+    with t3:
+        # AI rating display
+        _g = a.get("grok")
+        _g_ai = _g.get("ai_rating", 0) if _g and not _g.get("error") else 0
+        st.markdown(f"<div style='font-family:Space Mono,monospace;font-size:14px;padding-top:6px;'>AI {_g_ai}/10</div>", unsafe_allow_html=True)
+    with t4:
+        mkt_c = "#10b981" if mkt=="LIVE" else "#f59e0b"
+        st.markdown(f"<span style='font-family:Space Mono,monospace;font-size:11px;color:{mkt_c};'>{mkt}</span>",unsafe_allow_html=True)
+
+    # ── AI ANALYSIS PANEL ────────────────────────────────────
+    grok = a.get("grok")
+    if grok and not grok.get("error"):
+        grok_ai_r = grok.get("ai_rating", 0)
+        ai_dir = grok.get("direction", a["direction"])
+        ai_action = grok.get("action", "WAIT")
+        ai_conf = grok.get("confidence", "LOW")
+        ai_col = "#10b981" if grok_ai_r >= 7 else ("#f59e0b" if grok_ai_r >= 5 else "#ef4444")
+        ai_dc  = "#10b981" if ai_dir=="Buy" else ("#ef4444" if ai_dir=="Sell" else "#8b9ab0")
+        conf_col = "#10b981" if ai_conf=="HIGH" else ("#f59e0b" if ai_conf=="MEDIUM" else "#4a5568")
+        border_col = ai_col
+        agrees = grok.get("agrees_with_calculator", ai_dir == a["direction"])
+
+        reasoning = grok.get("reasoning", "")
+        key_factors = grok.get("key_factors", [])
+        news_imp = grok.get("news_impact", "")
+        risk_warn = grok.get("risk_warning", "")
+        factors_html = "".join(f"<span style='font-size:10px;color:#a78bfa;background:rgba(167,139,250,0.1);"
+                               f"padding:2px 8px;border-radius:3px;margin-right:6px;'>{f}</span>" for f in key_factors[:4])
+
+        st.markdown(
+            f"<div style='background:linear-gradient(135deg,rgba(13,17,23,0.95),rgba(0,212,170,0.03));"
+            f"border:2px solid {border_col};border-radius:12px;padding:16px 20px;margin:12px 0;'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;'>"
+            f"<span style='font-family:Space Mono,monospace;font-size:11px;color:#00d4aa;letter-spacing:.15em;'>◈ AI ANALYSIS</span>"
+            f"<span style='font-size:10px;color:{conf_col};font-family:Space Mono,monospace;"
+            f"background:rgba(255,255,255,0.04);padding:2px 8px;border-radius:3px;'>{ai_conf} CONFIDENCE</span></div>"
+            # AI Rating
+            f"<div style='display:flex;gap:16px;align-items:center;margin-bottom:12px;'>"
+            f"<span style='font-family:Space Mono,monospace;font-size:36px;font-weight:900;color:{ai_col};'>"
+            f"{grok_ai_r}/10</span>"
+            f"<div>"
+            f"<div style='font-family:Space Mono,monospace;font-size:16px;font-weight:700;color:{ai_dc};'>"
+            f"{'▲' if ai_dir=='Buy' else ('▼' if ai_dir=='Sell' else '◈')} {ai_action}</div>"
+            f"<div style='font-size:11px;color:#4a5568;margin-top:2px;'>"
+            f"Calc: {a['score']}/100 ({a['grade']}) "
+            f"{'✅' if agrees else '⚠'}</div></div></div>"
+            # Reasoning
+            f"<div style='font-size:12px;color:#e8edf2;margin-bottom:10px;line-height:1.5;'>{reasoning}</div>"
+            # Key factors
+            f"<div style='margin-bottom:8px;'>{factors_html}</div>"
+            # News + Risk
+            + (f"<div style='font-size:11px;color:#a78bfa;margin-bottom:4px;'>📰 {news_imp}</div>" if news_imp else "")
+            + (f"<div style='font-size:11px;color:#f59e0b;'>⚠ {risk_warn}</div>" if risk_warn and risk_warn.lower() != "none" else "")
+            + f"</div>",
+            unsafe_allow_html=True)
+
+    # ── Warnings ─────────────────────────────────────────────
+    if a["warns"]:
+        for w in a["warns"]:
+            st.markdown(f"<div style='background:rgba(245,158,11,0.08);border-left:3px solid #f59e0b;border-radius:4px;padding:6px 12px;margin:3px 0;font-size:12px;color:#f59e0b;'>{w}</div>", unsafe_allow_html=True)
+
+    # ── Spike Alert ──────────────────────────────────────────
+    sp_info = a.get("spike", {})
+    if sp_info.get("is_spike"):
+        sp_lvl = sp_info["alert_level"]
+        sp_col = "#ef4444" if sp_lvl == "danger" else ("#f59e0b" if sp_lvl == "warning" else "#a78bfa")
+        sp_bg  = "rgba(239,68,68,0.12)" if sp_lvl == "danger" else ("rgba(245,158,11,0.08)" if sp_lvl == "warning" else "rgba(167,139,250,0.08)")
+        sp_border = sp_col
+        advice = ""
+        if sp_lvl == "danger":
+            advice = " | <b>Recommendation: STAY OUT or widen SL</b>"
+        elif sp_lvl == "opportunity":
+            advice = " | <b>Potential spike continuation trade</b>"
+        st.markdown(
+            f"<div style='background:{sp_bg};border:1px solid {sp_col}44;border-left:3px solid {sp_col};"
+            f"border-radius:6px;padding:10px 14px;margin:6px 0;font-size:12px;color:{sp_col};"
+            f"font-family:Space Mono,monospace;'>"
+            f"<b>SPIKE DETECTED</b> — {sp_info['message']}{advice}<br>"
+            f"<span style='font-size:10px;color:#8b9ab0;'>ATR Ratio: {sp_info['spike_atr_ratio']}x "
+            f"| Body: {sp_info.get('body_ratio',0)*100:.0f}% | Dir: {sp_info['direction']}</span></div>",
+            unsafe_allow_html=True)
+
+    # ── Gold Engine Panel (XAUUSD only) ────────────────────────
+    gi = a.get("gold", {})
+    if gi and norm(symbol) == "XAUUSD":
+        ar = gi.get("asian_range", {})
+        bo = gi.get("breakout", "no_data")
+        sw = gi.get("sweep", {})
+        sq = gi.get("session_quality", "off")
+        bonus = gi.get("bonus", 0)
+
+        bo_col = "#10b981" if gi.get("breakout_aligned") else ("#f59e0b" if bo == "inside" else "#8b9ab0")
+        bo_text = {"bull_breakout": "▲ BULL Breakout", "bear_breakout": "▼ BEAR Breakout",
+                   "inside": "◈ Inside Range", "invalid": "— No Data", "no_data": "— No Data"}.get(bo, bo)
+        _sw_lvl = f"{sw.get('sweep_level', 0):.2f}"
+        sw_text = f"🏦 {sw['direction'].upper()} sweep @ {_sw_lvl}" if sw.get("detected") else "— None detected"
+        sq_col = "#10b981" if sq == "prime" else ("#84cc16" if sq == "good" else ("#f59e0b" if sq == "range" else "#8b9ab0"))
+        sq_text = {"prime": "★ PRIME (Overlap)", "good": "● Good", "range": "◐ Range (Asian)", "off": "○ Off-peak"}.get(sq, sq)
+        b_col = "#10b981" if bonus > 0 else ("#ef4444" if bonus < 0 else "#8b9ab0")
+
+        st.markdown(
+            f"<div style='background:rgba(255,215,0,0.04);border:1px solid rgba(255,215,0,0.15);"
+            f"border-radius:8px;padding:12px 14px;margin:8px 0;'>"
+            f"<div style='font-size:10px;color:#ffd700;font-family:Space Mono,monospace;"
+            f"letter-spacing:.1em;margin-bottom:8px;'>🥇 GOLD ENGINE</div>"
+            f"<div style='display:flex;gap:12px;font-size:11px;flex-wrap:wrap;'>"
+            f"<div><span style='color:#8b9ab0;'>Asian Range: </span>"
+            f"<span style='color:#e8edf2;'>{(str(round(ar['low'],2)) + ' — ' + str(round(ar['high'],2))) if ar.get('valid') else 'N/A'}</span></div>"
+            f"<div><span style='color:#8b9ab0;'>Breakout: </span>"
+            f"<span style='color:{bo_col};font-weight:700;'>{bo_text}</span></div>"
+            f"<div><span style='color:#8b9ab0;'>Sweep: </span>"
+            f"<span style='color:#e8edf2;'>{sw_text}</span></div>"
+            f"<div><span style='color:#8b9ab0;'>Session: </span>"
+            f"<span style='color:{sq_col};'>{sq_text}</span></div>"
+            f"<div><span style='color:#8b9ab0;'>Score Adj: </span>"
+            f"<span style='color:{b_col};font-weight:700;'>{bonus:+d} pts</span></div>"
+            f"</div></div>",
+            unsafe_allow_html=True)
+
+    # ── KPI cards — mobile-friendly 2-row grid ────────────────
+    def kpi(lbl, val, col="#e8edf2"):
+        return (f"<div style='background:#0d1117;border:1px solid rgba(255,255,255,0.08);border-radius:8px;"
+                f"padding:10px 12px;min-width:90px;flex:1;'>"
+                f"<div style='font-size:9px;color:#8b9ab0;font-family:Space Mono,monospace;"
+                f"letter-spacing:.08em;margin-bottom:4px;white-space:nowrap;overflow:hidden;'>{lbl}</div>"
+                f"<div style='font-size:14px;font-weight:700;color:{col};font-family:Space Mono,monospace;"
+                f"white-space:nowrap;'>{val}</div></div>")
+    h4c = "#10b981" if "bull" in a["h4_trend"] else ("#ef4444" if "bear" in a["h4_trend"] else "#f59e0b")
+    rc  = "#ef4444" if a["rsi"]>70 else ("#10b981" if a["rsi"]<30 else "#e8edf2")
+    sess_col = "#10b981" if a["session_ok"] else "#6b7280"
+    # Row 1: trend context
+    st.markdown(
+        f"<div style='display:flex;gap:6px;margin:10px 0 6px;'>"
+        f"{kpi('H4 TREND', a['h4_trend'].upper(), h4c)}"
+        f"{kpi('RSI14', fmt_num(a['rsi'],1), rc)}"
+        f"{kpi('ATR', fmt_num(a['atr'],cfg_['dec']), '#8b9ab0')}"
+        f"{kpi('SESSION', a['session'][:10], sess_col)}"
+        f"</div>", unsafe_allow_html=True)
+    _se_type_icon = "🟢" if _se_type == "MARKET" else ("🟡" if _se_type == "LIMIT" else "🔴")
+
+    # Row 2: Smart Entry + trade levels
+    st.markdown(
+        f"<div style='display:flex;gap:6px;margin:0 0 4px;'>"
+        f"{kpi(f'{_se_type_icon} ENTRY ({_se_type})', fmt_price(_se_price,symbol), _se_type_col)}"
+        f"{kpi('SL', fmt_price(a['sl'],symbol), '#ef4444')}"
+        f"{kpi('TP1', fmt_price(a['tp1'],symbol), '#10b981')}"
+        f"{kpi('TP2', fmt_price(a['tp2'],symbol), '#84cc16')}"
+        f"{kpi('R:R', fmt_num(a['rr'],1)+':1', '#a78bfa')}"
+        f"</div>", unsafe_allow_html=True)
+
+    # Entry Quality bar + reason
+    _eq_bar_col = "#10b981" if _se_quality >= 4 else ("#f59e0b" if _se_quality >= 3 else "#ef4444")
+    _eq_pct = _se_quality * 20
+    st.markdown(
+        f"<div style='background:#0d1117;border:1px solid rgba(255,255,255,0.08);border-radius:8px;"
+        f"padding:8px 12px;margin:0 0 8px;'>"
+        f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;'>"
+        f"<span style='font-size:10px;color:#8b9ab0;font-family:Space Mono,monospace;letter-spacing:.05em;'>ENTRY QUALITY</span>"
+        f"<span style='font-size:12px;color:{_eq_bar_col};font-weight:700;'>{_se_stars}</span></div>"
+        f"<div style='background:rgba(255,255,255,0.06);border-radius:4px;height:6px;margin-bottom:6px;'>"
+        f"<div style='background:{_eq_bar_col};width:{_eq_pct}%;height:100%;border-radius:4px;'></div></div>"
+        f"<div style='font-size:10px;color:#8b9ab0;font-family:Space Mono,monospace;'>{_se_reason}</div>"
+        f"</div>", unsafe_allow_html=True)
+
+    # Row 3: Risk/Reward in actual currency
+    bal = st.session_state.get("balance", 1000.0)
+    rpct = st.session_state.get("risk_pct", 1.0)
+    risk_amt = bal * rpct / 100
+    reward_tp1 = risk_amt * a["rr"] if a["rr"] > 0 else 0
+    reward_tp2 = risk_amt * (a.get("tp2",0) - a["close"]) / a["sl_d"] if a["sl_d"] > 0 and a["direction"]=="Buy" else (risk_amt * (a["close"] - a.get("tp2",0)) / a["sl_d"] if a["sl_d"] > 0 else 0)
+    rr2 = abs(reward_tp2 / risk_amt) if risk_amt > 0 else 0
+    ccy = st.session_state.get("currency_label", "USD")
+    st.markdown(
+        f"<div style='display:flex;gap:6px;margin:0 0 10px;'>"
+        f"{kpi('💰 RISK', f'{ccy} {risk_amt:,.0f}', '#ef4444')}"
+        f"{kpi('🎯 TP1 REWARD', f'{ccy} {reward_tp1:,.0f}', '#10b981')}"
+        f"{kpi('🎯 TP2 REWARD', f'{ccy} {abs(reward_tp2):,.0f}', '#84cc16')}"
+        f"{kpi('📊 R:R (TP2)', f'{rr2:.1f}:1', '#a78bfa')}"
+        f"</div>", unsafe_allow_html=True)
+
+    # ── Chart — full width for mobile ─────────────────────────
+    positions = fetch_mt5_positions(get_ma_token(), get_ma_account()) if (_is_owner() or get_ma_token()) else []
+    sym_pos = [p for p in positions if norm(p.get("symbol","")).replace(".R","") == symbol]
+    if sym_pos and _is_owner():
+        st.markdown("<div style='font-size:11px;color:#00d4aa;font-family:Space Mono,monospace;margin-bottom:4px;'>📡 MT5 POSITIONS</div>", unsafe_allow_html=True)
+        rows = []
+        for p in sym_pos:
+            rows.append({"Type": p.get("type","?").replace("POSITION_TYPE_",""),
+                          "Vol": p.get("volume",0),
+                          "Open": fmt_price(p.get("openPrice",0),symbol),
+                          "Current": fmt_price(p.get("currentPrice",0),symbol),
+                          "SL": fmt_price(p.get("stopLoss",0),symbol),
+                          "TP": fmt_price(p.get("takeProfit",0),symbol),
+                          "P&L": f"${p.get('profit',0):+.2f}"})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    df_plot = a["df"].tail(150)
+    trade_active = next((t for t in st.session_state.get("active_trades",[]) if t.get("symbol")==symbol), None)
+    render_price_chart(
+        df_plot, symbol,
+        entry=trade_active["entry"] if trade_active else None,
+        sl=trade_active["sl"] if trade_active else None,
+        tp1=trade_active.get("tp1") if trade_active else a["tp1"],
+        tp2=trade_active.get("tp2") if trade_active else a["tp2"],
+        title=f"{symbol} {int_label}")
+
+    # ── Below chart: 2-column layout (better on mobile) ───────
+    col_l, col_r = st.columns([1, 1])
+
+    with col_l:
+        # Score breakdown (calculator backup)
+        with st.expander("📊 Calculator Breakdown (Backup)", expanded=False):
+            render_score_breakdown(a["bd"], a["score"], a["grade"])
+
+        # ── Signal alert: Unified score Grade A/A+ ──────────────
+        grok_rating = grok.get("ai_rating", 0) if grok and not grok.get("error") else 0
+        _uni_s = int(a["score"] * 0.6 + (grok_rating * 10) * 0.4)
+        _uni_s = max(0, min(100, _uni_s))
+        _c_alert = cfg(symbol)
+        _uni_triggered = _uni_s >= _c_alert.get("grade_a", 76)
+        calc_triggered = a["grade"] in ("A+", "A")
+        grok_triggered = _uni_triggered  # Use unified instead of raw AI rating
+        alert_key    = f"_alerted_{symbol}_{a['grade']}_{a['direction']}_{a['score']}_{grok_rating}"
+        ai_vfy_key   = f"_ai_vfy_{symbol}_{a['grade']}_{a['direction']}_{a['score']}"
+        if (grok_triggered or calc_triggered) and not st.session_state.get(alert_key):
+            # Run AI verification once per unique signal
+            if ai_vfy_key not in st.session_state:
+                with st.spinner("🤖 AI verifying signal…"):
+                    st.session_state[ai_vfy_key] = verify_signal_with_ai(
+                        symbol, a["grade"], a["direction"], a["score"], a)
+            if st.session_state.get(ai_vfy_key):
+                fire_signal_alert(symbol, a["grade"], a["direction"], a["score"])
+                st.session_state[alert_key] = True
+                # Log to signals DB
+                log_signal_to_db(symbol, a["direction"], a["grade"], a["score"],
+                                 True, a.get("session","?"), a.get("rsi",50), a.get("h4_trend","?"))
+                _grok_label = f" | AI Rating: {grok_rating}/10" if grok_rating else ""
+                st.markdown(
+                    f"<div style='background:rgba(0,212,170,0.1);border:1px solid #00d4aa;"
+                    f"border-left:3px solid #00d4aa;border-radius:6px;padding:8px 12px;margin:6px 0;"
+                    f"font-size:12px;color:#00d4aa;font-family:Space Mono,monospace;animation:alertpulse 1.5s 3;'>"
+                    f"🔔 SIGNAL — AI CONFIRMED ✅ — {a['direction']} {symbol} (Calc: {a['grade']} {a['score']}/100{_grok_label})"
+                    f"</div>", unsafe_allow_html=True)
+            else:
+                st.session_state[alert_key] = True  # mark as handled, no alert
+                # Log rejected signal to DB
+                log_signal_to_db(symbol, a["direction"], a["grade"], a["score"],
+                                 False, a.get("session","?"), a.get("rsi",50), a.get("h4_trend","?"))
+                st.markdown(
+                    f"<div style='background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.3);"
+                    f"border-left:3px solid #f59e0b;border-radius:6px;padding:8px 12px;margin:6px 0;"
+                    f"font-size:12px;color:#fcd34d;font-family:Space Mono,monospace;'>"
+                    f"⚠ {a['grade']} SIGNAL — AI NOT CONFIRMED — {a['direction']} {symbol} ({a['score']}/100). Skip or verify manually."
+                    f"</div>", unsafe_allow_html=True)
+
+        # News — Trading Economics first, Grok fallback
+        news_key = f"news_{symbol}"
+        te_key   = get_te_key()
+        nb1, nb2 = st.columns([2,1])
+        if te_key:
+            if nb1.button(f"📅 Load News (TE)", key=f"news_btn_{symbol}"):
+                with st.spinner("Fetching economic calendar…"):
+                    st.session_state[news_key] = get_te_news_for_symbol(symbol, te_key)
+        else:
+            if nb1.button(f"🗞 Load News (Grok)", key=f"news_btn_{symbol}"):
+                with st.spinner("Getting Grok news…"):
+                    st.session_state[news_key] = get_news_sentiment(symbol, get_xai_key())
+        # Manual Grok fallback button if TE key exists
+        if te_key:
+            if nb2.button("🤖 Grok", key=f"grok_news_btn_{symbol}", help="Use Grok AI news instead"):
+                with st.spinner("Asking Grok…"):
+                    st.session_state[news_key] = get_news_sentiment(symbol, get_xai_key())
+
+        news = st.session_state.get(news_key)
+        if news:
+            rc_    = {"HIGH":"#ef4444","MEDIUM":"#f59e0b","LOW":"#10b981"}.get(news["risk"],"#8b9ab0")
+            adj_   = f"+{news['adj']}" if news["adj"]>0 else str(news["adj"])
+            source = news.get("source","Grok")
+            title  = "📅 TE CALENDAR" if source=="TE" else "🤖 GROK NEWS"
+            st.markdown(
+                f"<div class='panel'>"
+                f"<div class='mono-title'>{title}</div>"
+                f"<div style='display:flex;gap:12px;margin-bottom:6px;font-size:12px;'>"
+                f"<span>Risk: <b style='color:{rc_};'>{news['risk']}</b></span>"
+                f"<span>Adj: <b style='color:{rc_};'>{adj_}</b></span>"
+                f"<span>Bias: <b>{news['bias'].upper()}</b></span></div>"
+                f"<div style='font-size:12px;color:#e8edf2;margin-bottom:6px;'>{news['summary']}</div>"
+                + "".join(f"<div style='font-size:11px;color:#8b9ab0;margin-bottom:2px;'>▸ {e}</div>" for e in news.get("events",[]))
+                + "</div>", unsafe_allow_html=True)
+            # Store for AI trade advisor context
+            st.session_state[f"last_news_{symbol}"] = news
+
+        # AI analysis button
+        ai_key = f"ai_{symbol}_{interval}"
+        if st.button(f"🤖 AI Analysis", key=f"ai_btn_{symbol}"):
+            with st.spinner("Asking Grok..."):
+                news_d = st.session_state.get(f"news_{symbol}")
+                st.session_state[ai_key] = get_ai_analysis(
+                    symbol, a["direction"], a["score"], a["grade"],
+                    price, a["sl"], a["tp1"], a["tp2"],
+                    a["atr"], a["rsi"], a["macd_hist"], a["session"],
+                    news_d, a["df"].tail(10))
+        if ai_key in st.session_state:
+            st.markdown(f"<div class='ai-bubble'><div class='ai-header'>◈ GROK ANALYSIS</div>{st.session_state[ai_key]}</div>", unsafe_allow_html=True)
+
+    with col_r:
+        render_trade_tracker(symbol, price, a, td_key)
+
+# ============================================================
+# PAGE 3 — TRADE OVERVIEW & JOURNAL
+# ============================================================
+def page_trades():
+    st.markdown("<div style='font-family:Space Mono,monospace;font-size:18px;color:#00d4aa;letter-spacing:.12em;padding:4px 0 16px;'>◈ TRADE OVERVIEW & JOURNAL</div>", unsafe_allow_html=True)
+
+    # ── Open trades ──────────────────────────────────────────
+    trades = st.session_state.get("active_trades",[])
+    st.markdown("<div class='mono-title' style='font-size:12px;'>OPEN TRADES</div>", unsafe_allow_html=True)
+    if not trades:
+        st.markdown("<div style='color:#4a5568;font-size:13px;padding:8px 0;'>No open trades. Enter trades from the symbol pages.</div>", unsafe_allow_html=True)
     else:
-        pnl_r = (entry_p - exit_price) / risk_dist if risk_dist > 0 else 0
-    record = {
-        "id":      len(load_journal()) + 1,
-        "ts":      _dt.utcnow().strftime("%Y-%m-%d %H:%M"),
-        "symbol":  plan.symbol,
-        "dir":     direction,
-        "entry":   entry_p,
-        "sl":      sl_p,
-        "exit":    exit_price,
-        "lot":     trade["lot"],
-        "result":  result,
-        "pnl_r":   round(pnl_r, 2),
-        "tech":    trade.get("locked_score", 0),
-        "final":   trade.get("locked_final", 0),
-        "grade":   trade.get("locked_grade", "?"),
-        "news_risk":  getattr(plan,"news_risk","?"),
-        "news_bias":  getattr(plan,"news_bias","?"),
-        "news_adj":   getattr(plan,"news_adj", 0),
-        "session":    getattr(plan,"session_label","?"),
-        "confluence": getattr(plan,"confluence_count", 0),
-        "tp1":        trade.get("tp1"),
-        "tp2":        trade.get("tp2"),
-        "notes":   notes,
-    }
-    j = load_journal(); j.append(record); save_journal(j)
-    return j
+        rows = []
+        for t in trades:
+            sym = t.get("symbol","?")
+            tick = fetch_mt5_price(sym, get_ma_token_price(), get_ma_account_price())
+            live = tick["bid"] if tick else float(t["entry"])
+            risk = abs(float(t["entry"])-float(t["sl"]))
+            move = (live-float(t["entry"])) if t["direction"]=="Buy" else (float(t["entry"])-live)
+            pnl_r = round(move/risk,2) if risk>0 else 0
+            rows.append({
+                "Symbol": sym, "Dir": t["direction"], "Entry": fmt_price(t["entry"],sym),
+                "SL": fmt_price(t["sl"],sym), "TP1": fmt_price(t.get("tp1"),sym),
+                "Lot": t.get("lot",0.01), "Grade": t.get("locked_grade","?"),
+                "Live P&L (R)": f"{pnl_r:+.2f}",
+                "Price": fmt_price(live,sym)+" (MT5)" if tick else fmt_price(live,sym)+" (TD)",
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-def journal_stats(journal: List[dict]) -> dict:
-    if not journal: return {}
-    total  = len(journal)
-    wins   = sum(1 for t in journal if t.get("result")=="Win")
-    losses = sum(1 for t in journal if t.get("result")=="Loss")
-    bes    = sum(1 for t in journal if t.get("result")=="BE")
-    wr     = wins/total*100
-    pnls   = [t.get("pnl_r",0) for t in journal]
-    gross_p = sum(p for p in pnls if p>0)
-    gross_l = abs(sum(p for p in pnls if p<0))
-    pf      = gross_p/gross_l if gross_l>0 else float("inf")
-    # by grade
-    grade_s={}
-    for g in ["A","B","C","D"]:
-        gt=[t for t in journal if t.get("grade")==g]
-        if gt: grade_s[g]={"n":len(gt),"wr":sum(1 for t in gt if t.get("result")=="Win")/len(gt)*100}
-    # by news risk
-    news_s={}
-    for n in ["HIGH","MEDIUM","LOW"]:
-        nt=[t for t in journal if t.get("news_risk")==n]
-        if nt: news_s[n]={"n":len(nt),"wr":sum(1 for t in nt if t.get("result")=="Win")/len(nt)*100}
-    # by session
-    sess_s={}
-    for t in journal:
-        s=t.get("session","?")
-        if s not in sess_s: sess_s[s]={"n":0,"w":0}
-        sess_s[s]["n"]+=1
-        if t.get("result")=="Win": sess_s[s]["w"]+=1
-    for s in sess_s: sess_s[s]["wr"]=sess_s[s]["w"]/sess_s[s]["n"]*100
-    # by score bucket
-    score_s={}
-    for t in journal:
-        b=(t.get("final",0)//10)*10
-        if b not in score_s: score_s[b]={"n":0,"w":0}
-        score_s[b]["n"]+=1
-        if t.get("result")=="Win": score_s[b]["w"]+=1
-    for b in score_s: score_s[b]["wr"]=score_s[b]["w"]/score_s[b]["n"]*100
-    return {"total":total,"wins":wins,"losses":losses,"bes":bes,"wr":wr,
-            "total_r":round(sum(pnls),2),"avg_r":round(sum(pnls)/total,2),
-            "pf":round(pf,2) if pf!=float("inf") else "∞",
-            "grade_s":grade_s,"news_s":news_s,"sess_s":sess_s,"score_s":score_s}
+    # ── MT5 live positions (owner only) ────────────────────────────────────
+    st.markdown("---")
+    positions = fetch_mt5_positions(get_ma_token(), get_ma_account()) if (_is_owner() or get_ma_token()) else []
+    if positions and _is_owner():
+        st.markdown("<div class='mono-title' style='font-size:12px;'>📡 MT5 LIVE POSITIONS</div>", unsafe_allow_html=True)
+        pos_rows = []
+        total_pnl = 0
+        for p in positions:
+            sym_p = p.get("symbol","?")
+            profit = p.get("profit",0); total_pnl += profit
+            pos_rows.append({
+                "Symbol": sym_p, "Type": p.get("type","?").replace("POSITION_TYPE_",""),
+                "Volume": p.get("volume",0), "Open": p.get("openPrice",0),
+                "Current": p.get("currentPrice",0),
+                "SL": p.get("stopLoss",0), "TP": p.get("takeProfit",0),
+                "P&L ($)": f"${profit:+.2f}"})
+        st.dataframe(pd.DataFrame(pos_rows), use_container_width=True, hide_index=True)
+        pnl_c = "#10b981" if total_pnl>=0 else "#ef4444"
+        st.markdown(f"<div style='font-family:Space Mono,monospace;font-size:14px;color:{pnl_c};padding:6px 0;'>Total P&L: ${total_pnl:+.2f}</div>", unsafe_allow_html=True)
 
-def journal_insights(journal: List[dict]) -> List[str]:
-    MIN = 5
-    if len(journal) < MIN:
-        return [f"📊 Need {MIN-len(journal)} more trades to generate AI insights."]
-    s = journal_stats(journal)
-    tips = []
-    wr = s["wr"]
-    tips.append(f"{'✅' if wr>=55 else '⚠️' if wr>=45 else '🔴'} Overall win rate: {wr:.0f}% ({s['wins']}W / {s['losses']}L / {s['bes']}BE)")
-    pf = s["pf"]
-    tips.append(f"💰 Profit factor: {pf}  |  Total: {s['total_r']:+.1f}R  |  Avg per trade: {s['avg_r']:+.2f}R")
-    # Grade insight
-    gs = s["grade_s"]
-    if gs:
-        best = max(gs.items(), key=lambda x:x[1]["wr"])
-        worst = min(gs.items(), key=lambda x:x[1]["wr"])
-        if best[1]["n"]>=2: tips.append(f"🏆 Best grade: {best[0]} — {best[1]['wr']:.0f}% win ({best[1]['n']} trades)")
-        if worst[1]["n"]>=2 and worst[1]["wr"]<45: tips.append(f"⛔ Avoid grade {worst[0]} — only {worst[1]['wr']:.0f}% win ({worst[1]['n']} trades)")
-    # News insight
-    ns = s["news_s"]
-    if "HIGH" in ns and ns["HIGH"]["n"]>=2:
-        hw = ns["HIGH"]["wr"]
-        tips.append(f"{'⚡ Avoid' if hw<40 else '✅ OK for'} HIGH news trades — {hw:.0f}% win rate ({ns['HIGH']['n']} trades)")
-    # Session insight
-    ss = s["sess_s"]
-    ranked = sorted(ss.items(), key=lambda x:x[1]["wr"], reverse=True)
-    if ranked and ranked[0][1]["n"]>=2:
-        tips.append(f"⏰ Best session: {ranked[0][0]} ({ranked[0][1]['wr']:.0f}% win)")
-    if len(ranked)>1 and ranked[-1][1]["n"]>=2 and ranked[-1][1]["wr"]<45:
-        tips.append(f"🚫 Worst session: {ranked[-1][0]} ({ranked[-1][1]['wr']:.0f}% win) — trade less here")
-    # Score threshold
-    sc = s["score_s"]
-    good_buckets = [(b,d) for b,d in sc.items() if d["n"]>=2 and d["wr"]>=60]
-    if good_buckets:
-        best_b = max(good_buckets, key=lambda x:x[1]["wr"])
-        tips.append(f"📈 Sweet spot: scores {best_b[0]}–{best_b[0]+9} → {best_b[1]['wr']:.0f}% win rate")
-    bad_buckets = [(b,d) for b,d in sc.items() if d["n"]>=2 and d["wr"]<35]
-    if bad_buckets:
-        worst_b = min(bad_buckets, key=lambda x:x[1]["wr"])
-        tips.append(f"📉 Avoid scores {worst_b[0]}–{worst_b[0]+9} → only {worst_b[1]['wr']:.0f}% win")
-    return tips
+    # ── Journal ───────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("<div class='mono-title' style='font-size:12px;'>TRADE JOURNAL</div>", unsafe_allow_html=True)
+    journal = load_journal()
+    stats   = journal_stats(journal)
 
+    if stats:
+        s1,s2,s3,s4,s5 = st.columns(5)
+        s1.metric("Trades",   stats["total"])
+        s2.metric("Win Rate",  f"{stats['wr']:.0f}%")
+        s3.metric("Total R",   f"{stats['total_r']:+.2f}")
+        s4.metric("Avg R",     f"{stats['avg_r']:+.2f}")
+        s5.metric("Prof Factor",f"{stats['pf']:.2f}")
+
+        # Equity curve
+        if len(journal)>=2:
+            cum_r = pd.Series([t.get("pnl_r",0) for t in journal]).cumsum()
+            fig_eq = go.Figure(go.Scatter(y=cum_r.tolist(),mode="lines+markers",
+                                          line=dict(color="#00d4aa",width=2),
+                                          fill="tozeroy",fillcolor="rgba(0,212,170,0.06)"))
+            fig_eq.update_layout(title="Equity Curve (R)",paper_bgcolor="#080c10",plot_bgcolor="#080c10",
+                                  font=dict(color="#e8edf2"),height=200,margin=dict(l=0,r=0,t=30,b=0),
+                                  xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                                  yaxis=dict(gridcolor="rgba(255,255,255,0.05)"))
+            st.plotly_chart(fig_eq, use_container_width=True)
+
+        # By grade performance
+        tab1, tab2, tab3 = st.tabs(["By Grade", "By Symbol", "By Session"])
+        with tab1:
+            grade_data = {}
+            for t in journal:
+                g = t.get("grade","?")
+                grade_data.setdefault(g,[]).append(t.get("pnl_r",0))
+            if grade_data:
+                gd = pd.DataFrame([{"Grade":g,"Trades":len(v),"Win%":sum(1 for x in v if x>0)/len(v)*100,
+                                     "Avg R":sum(v)/len(v)} for g,v in grade_data.items()])
+                st.dataframe(gd, use_container_width=True, hide_index=True)
+        with tab2:
+            sym_data = {}
+            for t in journal:
+                s = t.get("symbol","?")
+                sym_data.setdefault(s,[]).append(t.get("pnl_r",0))
+            if sym_data:
+                sd = pd.DataFrame([{"Symbol":s,"Trades":len(v),"Win%":sum(1 for x in v if x>0)/len(v)*100,
+                                     "Total R":sum(v)} for s,v in sym_data.items()])
+                st.dataframe(sd, use_container_width=True, hide_index=True)
+        with tab3:
+            sess_data = {}
+            for t in journal:
+                se = t.get("session","?")
+                sess_data.setdefault(se,[]).append(t.get("pnl_r",0))
+            if sess_data:
+                sd2 = pd.DataFrame([{"Session":se,"Trades":len(v),"Avg R":sum(v)/len(v)} for se,v in sess_data.items()])
+                st.dataframe(sd2, use_container_width=True, hide_index=True)
+
+    # Full log table
+    if journal:
+        st.markdown("<div class='mono-title' style='font-size:11px;margin-top:12px;'>FULL LOG</div>", unsafe_allow_html=True)
+        show_cols = ["id","ts","symbol","direction","entry","sl","exit","result","pnl_r","grade","session","notes"]
+        df_j = pd.DataFrame(journal)[[c for c in show_cols if c in pd.DataFrame(journal).columns]]
+        st.dataframe(df_j, use_container_width=True, hide_index=True)
+
+        cc1, cc2 = st.columns([1,4])
+        with cc1:
+            csv = df_j.to_csv(index=False)
+            st.download_button("⬇ Export CSV", csv, "journal.csv", "text/csv")
+        with cc2:
+            if st.button("🗑 Clear Journal"):
+                if st.session_state.get("_confirm_clear"):
+                    save_journal([]); st.session_state.pop("_confirm_clear",None)
+                    st.success("Journal cleared!"); st.rerun()
+                else:
+                    st.session_state["_confirm_clear"] = True
+                    st.warning("Click again to confirm clearing all journal data.")
+    else:
+        st.markdown("<div style='color:#4a5568;font-size:13px;'>No trades in journal yet.</div>", unsafe_allow_html=True)
 
 # ============================================================
-# MARKET OVERVIEW
+# PAGE 4 — BACKTEST
 # ============================================================
-def build_overview_row(sym,balance,risk_pct,td_key):
+def page_backtest():
+    st.markdown("<div style='font-family:Space Mono,monospace;font-size:18px;color:#00d4aa;letter-spacing:.12em;padding:4px 0 16px;'>◈ BACKTEST ENGINE</div>", unsafe_allow_html=True)
+
+    td_key = get_td_key()
+    if not td_key:
+        st.warning("⚠ Add your Twelve Data API key in the sidebar.")
+        return
+
+    # ── Settings ─────────────────────────────────────────────
+    st.markdown("<div class='mono-title'>BACKTEST SETTINGS</div>", unsafe_allow_html=True)
+    b1, b2, b3 = st.columns(3)
+    bt_sym  = b1.selectbox("Symbol",  ACTIVE_SYMBOLS, key="bt_sym")
+    bt_int  = b2.selectbox("Interval", list(INTERVAL_OPTIONS.keys()), index=1, key="bt_int")
+    # Calculate approximate bars needed for days
+    _mins_map = {"5 Min":5,"15 Min":15,"30 Min":30,"1 Hour":60,"4 Hours":240}
+    _bars_per_day = int(24*60 / _mins_map.get(bt_int, 15) * 5/7)  # trading days
+    bt_days = b3.slider("Days", 7, 90, 30, key="bt_days")
+    bt_bars = max(400, bt_days * _bars_per_day + 250)  # +250 for indicator warmup
+    st.markdown(f"<div style='font-size:10px;color:#4a5568;font-family:Space Mono,monospace;margin:-8px 0 8px;'>"
+                f"≈ {bt_bars} bars for {bt_days} days on {bt_int}</div>", unsafe_allow_html=True)
+
+    b4, b5, b6 = st.columns(3)
+    bt_balance  = b4.number_input("Balance", value=st.session_state.get("balance", 1000.0), min_value=100.0, key="bt_bal")
+    bt_risk_pct = b5.number_input("Risk %", value=st.session_state.get("risk_pct", 1.0), min_value=0.1, max_value=10.0, step=0.1, key="bt_risk")
+    bt_lot_mode = b6.selectbox("Lot Size", ["Auto (risk-based)", "Custom", "Fixed 0.01", "Fixed 0.1", "Fixed 1.0"], key="bt_lot_mode")
+
+    bt_custom_lot = 0.01
+    if bt_lot_mode == "Custom":
+        bt_custom_lot = st.number_input("Custom Lot Size", value=0.05, min_value=0.01, max_value=100.0, step=0.01, format="%.2f", key="bt_custom_lot")
+
+    b7, b8 = st.columns(2)
+    bt_min_grade = b7.selectbox("Min Grade", ["A+ only", "A and above", "B and above"], index=1, key="bt_min_grade")
+    run_bt = b8.button("▶ Run Backtest", key="btn_bt", type="primary")
+
+    if not run_bt:
+        return
+
+    interval = INTERVAL_OPTIONS[bt_int]
+    c_ = cfg(bt_sym)
+    ccy = st.session_state.get("currency_label", "USD")
+
+    with st.spinner("Running backtest..."):
+        try:
+            df_raw = add_indicators(fetch_bars(bt_sym, interval, bt_bars, td_key))
+            df_h4  = add_indicators(fetch_bars(bt_sym, "4h", 300, td_key))
+        except Exception as e:
+            st.error(f"Error: {e}"); return
+
+    # Grade filter
+    if bt_min_grade == "A+ only":
+        allowed_grades = {"A+"}
+    elif bt_min_grade == "A and above":
+        allowed_grades = {"A+", "A"}
+    else:
+        allowed_grades = {"A+", "A", "B"}
+
+    trades_bt = []
+    spike_trades = 0
+    consecutive_losses = 0
+    last_trade_bar = 0
+    is_gold = norm(bt_sym) == "XAUUSD"
+    COOLDOWN_BARS = 15 if is_gold else 8  # Gold needs more cooldown
+    OVEREXT_THRESH = 2.0 if is_gold else 3.0  # Stricter for gold
+
+    # ── Precompute H4 time index to prevent lookahead bias ────
+    h4_times = None
+    raw_times = None
     try:
-        df,plan=select_plan(sym,"15min",260,td_key)
-        plan=finalize_plan(plan,balance,risk_pct)
-        price=float(df["close"].iloc[-1])
-        return {"Symbol":sym,"Price":fmt_price(price,sym),"Signal":plan.direction,
-                "Status":plan.execution_status[:18],"Tech":plan.setup_score,
-                "News Adj":plan.news_adj,"Final":plan.final_score,"Grade":plan.final_grade,
-                "R:R":fmt_rr(plan.rr),"Session":plan.session_label[:15],"News":plan.news_risk}
-    except Exception as e:
-        return {"Symbol":sym,"Price":"ERR","Signal":"—","Status":str(e)[:18],
-                "Tech":0,"News Adj":0,"Final":0,"Grade":"D","R:R":"—","Session":"—","News":"—"}
+        h4_times = pd.to_datetime(df_h4["time"], utc=True)
+        raw_times = pd.to_datetime(df_raw["time"], utc=True)
+    except Exception:
+        pass  # Fallback: use full df_h4 (no time column)
+
+    i = 200
+
+    while i < len(df_raw)-1:
+        row   = df_raw.iloc[i]
+        df_sl = df_raw.iloc[:i+1]
+        close = float(row["close"])
+        atr   = float(row.get("atr14",0.001) or 0.001)
+
+        # ── Cooldown: skip if too soon after last trade ───────
+        if i - last_trade_bar < COOLDOWN_BARS and last_trade_bar > 0:
+            i += 1; continue
+
+        # ── Loss streak protection: pause after 3 consecutive losses ──
+        if consecutive_losses >= 3:
+            consecutive_losses = 0
+            i += COOLDOWN_BARS; continue  # Skip more bars after loss streak
+
+        # ── Slice H4 to prevent lookahead bias ────────────────
+        df_h4_sync = df_h4
+        if h4_times is not None and raw_times is not None:
+            current_time = raw_times.iloc[i]
+            h4_mask = h4_times <= current_time
+            h4_cutoff = h4_mask.sum()
+            if h4_cutoff >= 50:
+                df_h4_sync = df_h4.iloc[:h4_cutoff]
+
+        direction = determine_direction(df_sl, df_h4_sync, bt_sym)
+        if direction == "Wait":
+            i += 1; continue
+
+        # ── Overextended filter ───────────────────────────────
+        if _is_overextended(df_sl, direction, atr, threshold=OVEREXT_THRESH):
+            i += 1; continue
+
+        score, bd, grade, warns = score_signal(df_sl, df_h4_sync, bt_sym, direction)
+
+        # ── Gold Engine overlay for XAUUSD ────────────────────
+        if norm(bt_sym) == "XAUUSD":
+            score, _gi, grade, _gw = gold_engine_score(
+                df_sl, df_h4_sync, direction, score, grade)
+            warns.extend(_gw)
+
+        if grade not in allowed_grades:
+            i += 1; continue
+        if any("OPPOSES" in w for w in warns):
+            i += 1; continue
+
+        # ── Spike detection ───────────────────────────────────
+        spike_info = detect_spike(df_sl, atr, bt_sym, lookback=5)
+        # Skip trade if danger-level spike AGAINST our direction
+        if spike_info["is_spike"] and spike_info["alert_level"] == "danger":
+            spike_dir = spike_info["direction"]
+            if (direction == "Buy" and spike_dir == "Bear") or \
+               (direction == "Sell" and spike_dir == "Bull"):
+                i += 1; continue
+
+        # ── Levels: spike-adjusted if spike, swing-based otherwise ──
+        if spike_info["is_spike"]:
+            lvl = spike_adjusted_levels(close, direction, atr, bt_sym, spike_info, df=df_sl)
+            spike_trades += 1
+        else:
+            lvl = compute_levels(close, direction, atr, bt_sym, df=df_sl)
+        sl  = lvl["sl"]; tp1 = lvl["tp1"]; tp2 = lvl["tp2"]
+
+        # Lot size calculation
+        sl_pips = abs(close - sl) / c_.get("pip", 0.0001)
+        if bt_lot_mode == "Auto (risk-based)":
+            lot = compute_lot(bt_balance, bt_risk_pct, sl_pips, bt_sym)
+        elif bt_lot_mode == "Custom":
+            lot = bt_custom_lot
+        elif bt_lot_mode == "Fixed 0.01":
+            lot = 0.01
+        elif bt_lot_mode == "Fixed 0.1":
+            lot = 0.1
+        else:
+            lot = 1.0
+
+        # Simulate forward (smarter trailing stop system)
+        max_bars_forward = 80 if is_gold else 150  # Gold: faster timeout
+        result = "timeout"; exit_price = close; exit_i = i
+        trailing_sl = sl
+        be_trigger_pct = 0.5  # Move to BE at 50% of TP1 (was 60%)
+        trail_trigger_pct = 0.75  # Start trailing at 75% of TP1
+        risk_dist = abs(close - sl)
+        tp1_dist = abs(tp1 - close)
+
+        be_level = close + tp1_dist * be_trigger_pct if direction == "Buy" else close - tp1_dist * be_trigger_pct
+        trail_level = close + tp1_dist * trail_trigger_pct if direction == "Buy" else close - tp1_dist * trail_trigger_pct
+        moved_to_be = False
+        trailing_active = False
+        best_price = close  # Track best price for trailing
+
+        for j in range(i+1, min(i+max_bars_forward, len(df_raw))):
+            future = df_raw.iloc[j]
+            fh = float(future["high"]); fl = float(future["low"])
+
+            # Track best price reached
+            if direction == "Buy":
+                best_price = max(best_price, fh)
+            else:
+                best_price = min(best_price, fl)
+
+            # Stage 1: Move to breakeven at 50% of TP1
+            if not moved_to_be:
+                if (direction == "Buy" and fh >= be_level) or (direction == "Sell" and fl <= be_level):
+                    trailing_sl = close + (atr * 0.1 if direction == "Buy" else -atr * 0.1)
+                    moved_to_be = True
+
+            # Stage 2: Active trailing at 75% of TP1 — trail by 0.7× ATR (wider to let trades run)
+            if not trailing_active and moved_to_be:
+                if (direction == "Buy" and fh >= trail_level) or (direction == "Sell" and fl <= trail_level):
+                    trailing_active = True
+
+            if trailing_active:
+                if direction == "Buy":
+                    new_trail = best_price - atr * 0.7
+                    trailing_sl = max(trailing_sl, new_trail)
+                else:
+                    new_trail = best_price + atr * 0.7
+                    trailing_sl = min(trailing_sl, new_trail)
+
+            # Check SL hit — profitable trailing exits count as Win
+            if direction == "Buy":
+                if fl <= trailing_sl:
+                    if not moved_to_be:
+                        result = "Loss"
+                    elif trailing_sl > close + atr * 0.05:
+                        result = "Win"  # Profitable trailing stop = Win
+                    else:
+                        result = "BE"
+                    exit_price = trailing_sl; exit_i = j; break
+                if fh >= tp1:
+                    result = "Win"; exit_price = tp1; exit_i = j; break
+            else:
+                if fh >= trailing_sl:
+                    if not moved_to_be:
+                        result = "Loss"
+                    elif trailing_sl < close - atr * 0.05:
+                        result = "Win"  # Profitable trailing stop = Win
+                    else:
+                        result = "BE"
+                    exit_price = trailing_sl; exit_i = j; break
+                if fl <= tp1:
+                    result = "Win"; exit_price = tp1; exit_i = j; break
+
+        if result == "timeout":
+            exit_price = float(df_raw.iloc[min(i+max_bars_forward-1, len(df_raw)-1)]["close"])
+            exit_i = min(i+max_bars_forward-1, len(df_raw)-1)
+
+        risk = abs(close-sl)
+        move = (exit_price-close) if direction=="Buy" else (close-exit_price)
+        pnl_r = move/risk if risk>0 else 0
+        pnl_usd = pnl_r * (bt_balance * bt_risk_pct / 100)
+        bars_held = exit_i - i
+
+        if result == "Loss":
+            consecutive_losses += 1
+        elif result == "Win":
+            consecutive_losses = 0
+
+        last_trade_bar = exit_i
+        trade_date = str(df_raw.iloc[i]["time"])[:16]
+        is_spike_trade = spike_info["is_spike"]
+
+        trades_bt.append({
+            "Date": trade_date, "Dir": direction, "Grade": grade, "Score": score,
+            "Entry": round(close, c_["dec"]), "SL": round(sl, c_["dec"]),
+            "TP1": round(tp1, c_["dec"]), "Lot": lot,
+            "Result": result, "PnL_R": round(pnl_r, 2),
+            "PnL_$": round(pnl_usd, 2), "Bars": bars_held,
+            "RSI": round(float(row.get("rsi14", 50) or 50), 1),
+            "H4": _h4_trend(df_h4),
+            "Spike": "⚡" if is_spike_trade else "",
+        })
+        i = exit_i + 1
+
+    if not trades_bt:
+        st.info("No qualifying trades found in this period."); return
+
+    df_bt  = pd.DataFrame(trades_bt)
+    wins   = len(df_bt[df_bt["Result"]=="Win"])
+    losses = len(df_bt[df_bt["Result"]=="Loss"])
+    bes    = len(df_bt[df_bt["Result"]=="BE"])
+    timeouts = len(df_bt[df_bt["Result"]=="timeout"])
+    total  = len(df_bt)
+    decided = wins + losses  # exclude BE and timeout for true win rate
+    wr     = wins/decided*100 if decided else 0
+    total_r= df_bt["PnL_R"].sum()
+    total_usd = df_bt["PnL_$"].sum()
+    avg_r  = df_bt["PnL_R"].mean()
+    gp     = df_bt[df_bt["PnL_R"]>0]["PnL_R"].sum()
+    gl     = abs(df_bt[df_bt["PnL_R"]<0]["PnL_R"].sum())
+    pf     = gp/gl if gl>0 else 0
+    cum_r  = df_bt["PnL_R"].cumsum()
+    max_dd = (cum_r.cummax() - cum_r).max()
+    # Win/loss streaks
+    streak_w = 0; streak_l = 0; max_w = 0; max_l = 0
+    for r in df_bt["Result"]:
+        if r == "Win":
+            streak_w += 1; streak_l = 0; max_w = max(max_w, streak_w)
+        elif r == "Loss":
+            streak_l += 1; streak_w = 0; max_l = max(max_l, streak_l)
+        else:
+            streak_w = 0; streak_l = 0
+
+    # ── Stats Dashboard ──────────────────────────────────────
+    st.markdown("<div class='mono-title' style='margin-top:16px;'>BACKTEST RESULTS</div>", unsafe_allow_html=True)
+
+    def bt_stat(lbl, val, col="#e8edf2"):
+        return (f"<div style='background:#0d1117;border:1px solid rgba(255,255,255,0.08);"
+                f"border-radius:8px;padding:10px;flex:1;min-width:80px;text-align:center;'>"
+                f"<div style='font-size:9px;color:#8b9ab0;font-family:Space Mono,monospace;"
+                f"letter-spacing:.06em;margin-bottom:4px;'>{lbl}</div>"
+                f"<div style='font-size:16px;font-weight:700;color:{col};font-family:Space Mono,monospace;'>{val}</div></div>")
+
+    st.markdown(
+        f"<div style='display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;'>"
+        f"{bt_stat('TRADES', total)}"
+        f"{bt_stat('WIN RATE', f'{wr:.0f}%', '#10b981' if wr>=50 else '#ef4444')}"
+        f"{bt_stat('TOTAL R', f'{total_r:+.1f}R', '#10b981' if total_r>0 else '#ef4444')}"
+        f"{bt_stat(f'P&L ({ccy})', f'{total_usd:+,.0f}', '#10b981' if total_usd>0 else '#ef4444')}"
+        f"{bt_stat('PROFIT F', f'{pf:.2f}', '#10b981' if pf>1 else '#ef4444')}"
+        f"{bt_stat('MAX DD', f'{max_dd:.1f}R', '#ef4444')}"
+        f"</div>", unsafe_allow_html=True)
+    avg_bars_val = f"{df_bt['Bars'].mean():.0f}"
+    st.markdown(
+        f"<div style='display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;'>"
+        f"{bt_stat('AVG R', f'{avg_r:+.2f}', '#10b981' if avg_r>0 else '#ef4444')}"
+        f"{bt_stat('WINS', wins, '#10b981')}"
+        f"{bt_stat('LOSSES', losses, '#ef4444')}"
+        f"{bt_stat('BE', bes, '#f59e0b')}"
+        f"{bt_stat('WIN STREAK', max_w, '#10b981')}"
+        f"{bt_stat('LOSS STREAK', max_l, '#ef4444')}"
+        f"{bt_stat('AVG BARS', avg_bars_val)}"
+        f"</div>", unsafe_allow_html=True)
+
+    # ── Equity Curve ─────────────────────────────────────────
+    cum_usd = df_bt["PnL_$"].cumsum()
+    fig_eq = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                            row_heights=[0.7, 0.3], vertical_spacing=0.05,
+                            subplot_titles=["Equity Curve", "Drawdown"])
+    fig_eq.add_trace(go.Scatter(x=df_bt["Date"], y=cum_r, mode="lines+markers",
+                                 line=dict(color="#00d4aa", width=2),
+                                 fill="tozeroy", fillcolor="rgba(0,212,170,0.06)",
+                                 name="Cumulative R"), row=1, col=1)
+    # Drawdown
+    dd_series = cum_r - cum_r.cummax()
+    fig_eq.add_trace(go.Scatter(x=df_bt["Date"], y=dd_series, mode="lines",
+                                 fill="tozeroy", fillcolor="rgba(239,68,68,0.15)",
+                                 line=dict(color="#ef4444", width=1.5),
+                                 name="Drawdown"), row=2, col=1)
+    fig_eq.update_layout(paper_bgcolor="#080c10", plot_bgcolor="#080c10",
+                          font=dict(color="#e8edf2"), height=400,
+                          margin=dict(l=0,r=0,t=30,b=0), showlegend=True,
+                          legend=dict(orientation="h", y=1.02, bgcolor="rgba(0,0,0,0)"))
+    for ax in ["xaxis","yaxis","xaxis2","yaxis2"]:
+        fig_eq.update_layout(**{ax: dict(gridcolor="rgba(255,255,255,0.05)")})
+    st.plotly_chart(fig_eq, use_container_width=True)
+
+    # ── Trade Table ──────────────────────────────────────────
+    st.markdown("<div class='mono-title'>TRADE LOG</div>", unsafe_allow_html=True)
+    show_cols = ["Date","Dir","Grade","Score","Entry","SL","TP1","Lot","Result","PnL_R","PnL_$","Bars","RSI","H4","Spike"]
+    st.dataframe(df_bt[show_cols], use_container_width=True, hide_index=True)
+
+    # ── Breakdowns ───────────────────────────────────────────
+    tab1, tab2, tab3 = st.tabs(["By Grade", "By Direction", "By Session (RSI)"])
+    with tab1:
+        gd2 = df_bt.groupby("Grade").agg(
+            Trades=("PnL_R","count"),
+            Win_Rate=("Result", lambda x:(x=="Win").mean()*100),
+            Avg_R=("PnL_R","mean"),
+            Total_R=("PnL_R","sum"),
+            Total_USD=("PnL_$","sum")
+        ).round(2).reset_index()
+        st.dataframe(gd2, use_container_width=True, hide_index=True)
+    with tab2:
+        dd2 = df_bt.groupby("Dir").agg(
+            Trades=("PnL_R","count"),
+            Win_Rate=("Result", lambda x:(x=="Win").mean()*100),
+            Avg_R=("PnL_R","mean"),
+            Total_R=("PnL_R","sum")
+        ).round(2).reset_index()
+        st.dataframe(dd2, use_container_width=True, hide_index=True)
+    with tab3:
+        # RSI distribution analysis
+        df_bt["RSI_Zone"] = pd.cut(df_bt["RSI"], bins=[0,30,40,60,70,100],
+                                    labels=["<30 OS","30-40","40-60","60-70",">70 OB"])
+        rsi2 = df_bt.groupby("RSI_Zone", observed=True).agg(
+            Trades=("PnL_R","count"),
+            Win_Rate=("Result", lambda x:(x=="Win").mean()*100),
+            Avg_R=("PnL_R","mean")
+        ).round(2).reset_index()
+        st.dataframe(rsi2, use_container_width=True, hide_index=True)
+
+    # ── Grok AI Backtest Analysis ────────────────────────────
+    st.markdown("---")
+    if st.button("🤖 AI Backtest Analysis (Grok)", key="btn_bt_ai"):
+        key = get_xai_key()
+        if not key:
+            st.error("No xAI key.")
+        else:
+            bt_summary = (
+                f"BACKTEST RESULTS — {bt_sym} {bt_int} ({bt_bars} bars)\n"
+                f"Total trades: {total} | Win rate: {wr:.1f}% | Avg R: {avg_r:+.2f} | Total R: {total_r:+.2f}\n"
+                f"Profit Factor: {pf:.2f} | Max Drawdown: {max_dd:.1f}R\n"
+                f"Max Win Streak: {max_w} | Max Loss Streak: {max_l}\n"
+                f"Asset class: {c_.get('asset_class','forex')}\n\n"
+                f"BY GRADE:\n{gd2.to_string(index=False)}\n\n"
+                f"BY DIRECTION:\n{dd2.to_string(index=False)}\n\n"
+                f"Analyze this backtest:\n"
+                f"1. Is this strategy profitable? Is the edge statistically significant?\n"
+                f"2. What's the biggest weakness?\n"
+                f"3. Should I trade this symbol/timeframe with real money?\n"
+                f"4. Specific parameter adjustments to improve results?\n"
+                f"5. Compare to my live trading performance if data is available.\n"
+                f"Be brutally honest."
+            )
+            with st.spinner("Grok analyzing backtest…"):
+                bt_ai = _grok([
+                    {"role":"system","content":"You are a quantitative trading analyst reviewing backtest results. Be data-driven and honest."},
+                    {"role":"user","content":bt_summary}
+                ], max_tokens=600, temperature=0.3, api_key=key) or "No response."
+            st.session_state["bt_ai_analysis"] = bt_ai
+
+    if st.session_state.get("bt_ai_analysis"):
+        st.markdown(
+            f"<div class='ai-bubble'>"
+            f"<div style='font-size:10px;color:#6366f1;font-family:Space Mono,monospace;"
+            f"letter-spacing:.08em;margin-bottom:8px;'>🤖 GROK BACKTEST ANALYSIS</div>"
+            + st.session_state["bt_ai_analysis"].replace("\n","<br>") +
+            f"</div>", unsafe_allow_html=True)
 
 # ============================================================
 # SIDEBAR
 # ============================================================
-with st.sidebar:
-    st.markdown(f"<div style='font-family:Space Mono,monospace;font-size:11px;color:#00d4aa;letter-spacing:.12em;padding:8px 0 12px;'>AI FOREX TERMINAL<br><span style='color:#4a5568;'>{APP_VERSION}</span></div>",unsafe_allow_html=True)
-    mode=st.radio("Mode",["🔴  Live Analysis","📊  Backtest","📒  Journal"],index=0,label_visibility="collapsed")
-    st.markdown("---")
-    auto_refresh=st.toggle("Auto Refresh",value=True)
-    refresh_sec=st.selectbox("Interval (s)",[15,30,60,120],index=1)
-    if auto_refresh and st_autorefresh:
-        st_autorefresh(interval=int(refresh_sec)*1000,key="ar_v12")
-    st.markdown("---")
-    symbol=st.selectbox("Symbol",INTERNAL_SYMBOLS,index=3)
-    interval_label=st.selectbox("Interval",list(INTERVAL_MAP.keys()),index=2)
-    bars=st.slider("Bars",220,1000,400,20)
-    balance=st.number_input("Balance (USD)",min_value=10.0,value=500.0,step=50.0)
-    risk_pct=st.number_input("Risk %",min_value=0.1,max_value=5.0,value=1.0,step=0.1)
-    st.markdown("---")
-    st.markdown("<div style='font-size:11px;color:#8b9ab0;font-family:Space Mono,monospace;margin-bottom:4px;'>API KEYS</div>",unsafe_allow_html=True)
-    _td=st.text_input("Twelve Data",value=st.session_state.get("td_key",_ENV_TD),type="password",key="td_inp",placeholder="paste key…")
-    _xai=st.text_input("xAI Grok",value=st.session_state.get("xai_key",_ENV_XAI),type="password",key="xai_inp",placeholder="paste key…")
-    if _td:  st.session_state["td_key"]=_td
-    if _xai: st.session_state["xai_key"]=_xai
-    _GROK_MODELS=["grok-4-1-fast-non-reasoning","grok-4-1-fast-reasoning","grok-4.20-0309-non-reasoning","grok-4.20-0309-reasoning","grok-4.20-multi-agent-0309"]
-    _gm=st.selectbox("Grok Model",_GROK_MODELS,index=0,key="grok_model_sel")
-    st.session_state["grok_model"]=_gm
-    td_ok="✅" if _td else "❌"; xai_ok="✅" if _xai else "❌"
-    st.markdown(f"<div style='font-size:11px;color:#4a5568;font-family:Space Mono,monospace;'>{td_ok} Twelve Data &nbsp; {xai_ok} xAI ({_gm})</div>",unsafe_allow_html=True)
-    c1,c2=st.columns(2)
-    if _xai and c1.button("🔌 Test Grok"):
-        ok,msg=test_grok_connection(_xai)
-        (st.success if ok else st.error)(msg)
-    if _xai and c2.button("📋 List Models"):
-        try:
-            _r=requests.get("https://api.x.ai/v1/models",
-                            headers={"Authorization":f"Bearer {_xai}"},timeout=10)
-            if _r.status_code==200:
-                _ids=[m["id"] for m in _r.json().get("data",[])]
-                st.success("Available: "+", ".join(_ids) if _ids else "No models returned")
-            else:
-                st.error(f"HTTP {_r.status_code}: {_r.text[:120]}")
-        except Exception as e:
-            st.error(str(e))
-
-    # ── MetaApi (MT5 live data) ─────────────────────────────
-    st.markdown("---")
-    st.markdown("<div style='font-size:11px;color:#00d4aa;font-family:Space Mono,monospace;margin-bottom:4px;'>MT5 LIVE (MetaApi)</div>",unsafe_allow_html=True)
-    _ma_tok=st.text_input("MetaApi Token",value=st.session_state.get("ma_token",""),type="password",key="ma_tok_inp",placeholder="paste token…")
-    _ma_acc=st.text_input("Account ID",value=st.session_state.get("ma_account",""),key="ma_acc_inp",placeholder="e.g. abc123def456…")
-    _ma_sfx=st.text_input("Symbol suffix",value=st.session_state.get("ma_sym_suffix",".r"),key="ma_sfx_inp",placeholder=".r for FP Markets Raw",help="FP Markets Raw = .r  |  Standard = leave blank")
-    if _ma_tok:  st.session_state["ma_token"]=_ma_tok
-    if _ma_acc:  st.session_state["ma_account"]=_ma_acc
-    st.session_state["ma_sym_suffix"]=_ma_sfx
-    _ma_ok="✅" if (_ma_tok and _ma_acc) else "❌"
-    st.markdown(f"<div style='font-size:11px;color:#4a5568;font-family:Space Mono,monospace;'>{_ma_ok} MetaApi MT5 {'(connected)' if _ma_ok=='✅' else '(not set)'}</div>",unsafe_allow_html=True)
-    _mab1,_mab2=st.columns(2)
-    if _ma_tok and _ma_acc and _mab1.button("🔌 Test MT5"):
-        _ok,_msg=test_mt5_connection(_ma_tok,_ma_acc)
-        (st.success if _ok else st.error)(_msg)
-    if _ma_tok and _ma_acc and _mab2.button("▶ Deploy"):
-        _ok,_msg=deploy_mt5_account(_ma_tok,_ma_acc)
-        (st.success if _ok else st.error)(_msg)
-
-interval=INTERVAL_MAP[interval_label]
-TD_KEY=get_td_key()
-
 # ============================================================
-# EXIT ALERT ENGINE
+# PAGE — PERFORMANCE & AI HABIT ANALYSIS
 # ============================================================
-def _check_exit_alert(plan: "Plan", trade: dict, current_price: float, df: "pd.DataFrame") -> Tuple[bool, str, str]:
-    """
-    Returns (should_alert, message, urgency="HIGH"|"MEDIUM"|"TP2")
-    Checks: high-risk news, bias flip, ATR spike, near TP1, TP2 potential.
-    urgency "TP2" = green opportunity alert (hold for more).
-    """
-    if not trade:
-        return False, "", "LOW"
-    direction = trade["direction"]
-    entry     = float(trade["entry"])
-    reasons   = []
-    urgency   = "MEDIUM"
-    tp2_opportunity = []   # separate bucket — positive alert
+def page_performance():
+    st.markdown("<div style='font-family:Space Mono,monospace;font-size:18px;color:#00d4aa;"
+                "letter-spacing:.12em;padding:4px 0 16px;'>◈ PERFORMANCE & AI ANALYSIS</div>",
+                unsafe_allow_html=True)
 
-    # 1. High-impact news
-    if getattr(plan, "news_risk", "LOW") == "HIGH":
-        reasons.append(f"⚡ HIGH IMPACT NEWS ({getattr(plan,'news_bias','?')})")
-        urgency = "HIGH"
-
-    # 2. News bias flipped against position
-    nb = getattr(plan, "news_bias", "NEUTRAL")
-    if nb == "BEAR" and direction == "Buy":
-        reasons.append("📉 News bias flipped BEARISH — you're LONG")
-        urgency = "HIGH"
-    elif nb == "BULL" and direction == "Sell":
-        reasons.append("📈 News bias flipped BULLISH — you're SHORT")
-        urgency = "HIGH"
-
-    # 3. ATR volatility spike (current > 1.8× 20-bar average)
-    if "atr" in df.columns and len(df) >= 22:
-        last_atr = float(df["atr"].iloc[-1])
-        avg_atr  = float(df["atr"].iloc[-21:-1].mean())
-        if avg_atr > 0 and last_atr > avg_atr * 1.8:
-            mult = last_atr / avg_atr
-            reasons.append(f"💥 Volatility spike — ATR ×{mult:.1f} above normal")
-            if mult > 2.5:
-                urgency = "HIGH"
-
-    # ── Direction-aware progress helper ──────────────────────
-    def _dir_pct(tp_val, e, price, direc):
-        """Return % progress toward TP. Returns 0 if price moved wrong way."""
-        try:
-            tp_f  = float(tp_val)
-            total = abs(tp_f - e)
-            if total == 0: return 0
-            done  = (price - e) if direc == "Buy" else (e - price)
-            if done <= 0: return 0          # moved wrong direction
-            return min(int(done / total * 100), 100)
-        except:
-            return 0
-
-    # 4. Price ≥75% of the way to TP1 — direction-aware
-    _tp1 = trade.get("tp1") or getattr(plan, "tp1", None)
-    _tp2 = trade.get("tp2") or getattr(plan, "tp2", None)
-    if _tp1:
-        try:
-            tp1_pct = _dir_pct(_tp1, entry, current_price, direction)
-            if tp1_pct >= 75:
-                reasons.append(f"🎯 {tp1_pct}% to TP1 — consider partial exit or move SL to BE")
-        except Exception:
-            pass
-
-    # 5. TP2 opportunity — detect when price has reached/passed TP1 AND momentum continues
-    if _tp1 and _tp2:
-        try:
-            tp1f = float(_tp1); tp2f = float(_tp2)
-            # Price must have moved in correct direction past TP1
-            tp1_dist   = abs(tp1f - entry)
-            tp1_margin = tp1_dist * 0.10
-            passed_tp1 = (current_price >= tp1f - tp1_margin) if direction == "Buy" else (current_price <= tp1f + tp1_margin)
-            # Extra guard: TP1 must be in correct direction from entry
-            tp1_valid  = (tp1f > entry) if direction == "Buy" else (tp1f < entry)
-            passed_tp1 = passed_tp1 and tp1_valid
-            if passed_tp1:
-                # Check momentum: MACD still in trade direction
-                macd_ok = False
-                if "macd" in df.columns and "macd_sig" in df.columns:
-                    macd_val = float(df["macd"].iloc[-1])
-                    macd_sig = float(df["macd_sig"].iloc[-1])
-                    macd_ok = (macd_val > macd_sig) if direction == "Buy" else (macd_val < macd_sig)
-                # Check RSI not overextended
-                rsi_ok = True
-                if "rsi14" in df.columns:
-                    rsi_val = float(df["rsi14"].iloc[-1])
-                    rsi_ok = (rsi_val < 75) if direction == "Buy" else (rsi_val > 25)
-                # EMA trend still aligned
-                ema_ok = False
-                if "ema20" in df.columns and "ema50" in df.columns:
-                    e20 = float(df["ema20"].iloc[-1]); e50 = float(df["ema50"].iloc[-1])
-                    ema_ok = (e20 > e50) if direction == "Buy" else (e20 < e50)
-                score = sum([macd_ok, rsi_ok, ema_ok])
-                if score >= 2:
-                    tp2_pct_dist = abs(current_price - tp1f) / abs(tp2f - tp1f) * 100 if abs(tp2f - tp1f) > 0 else 0
-                    conf = ["MACD ✓" if macd_ok else "","RSI ✓" if rsi_ok else "","EMA ✓" if ema_ok else ""]
-                    conf_str = "  ".join(c for c in conf if c)
-                    tp2_opportunity.append(
-                        f"🚀 TP2 POTENTIAL — momentum still {'bullish' if direction=='Buy' else 'bearish'} ({conf_str}) "
-                        f"| Consider holding, move SL to TP1 ({fmt_price(tp1f,'')}) to lock profit"
-                    )
-        except Exception:
-            pass
-
-    # Return TP2 opportunity as its own alert type (green, not red)
-    if tp2_opportunity and not reasons:
-        return True, "  |  ".join(tp2_opportunity), "TP2"
-    if tp2_opportunity:
-        # Both warning + opportunity — append TP2 hint to warning message
-        reasons.extend(tp2_opportunity)
-
-    if not reasons:
-        return False, "", "LOW"
-    return True, "  |  ".join(reasons), urgency
-
-
-def _render_exit_alert(message: str, urgency: str):
-    """
-    Renders a fixed-position flashing banner + plays a beep sound.
-    Sound only fires once per unique alert message (deduplicated via session_state).
-    """
-    if urgency == "HIGH":
-        color="#ef4444"; bg="rgba(239,68,68,0.13)"; icon="🚨"
-    elif urgency == "TP2":
-        color="#00d4aa"; bg="rgba(0,212,170,0.11)"; icon="🚀"
-    else:
-        color="#f59e0b"; bg="rgba(245,158,11,0.11)"; icon="⚠️"
-
-    # Play sound only when alert is NEW (hash changes)
-    alert_hash = str(hash(message))
-    play_sound = st.session_state.get("_last_alert_hash") != alert_hash
-    if play_sound:
-        st.session_state["_last_alert_hash"] = alert_hash
-
-    sound_js = ""
-    if play_sound:
-        sound_js = """
-<script>
-(function(){
-  try {
-    var ctx = new (window.AudioContext || window.webkitAudioContext)();
-    function beep(f, t, d) {
-      var o = ctx.createOscillator(), g = ctx.createGain();
-      o.connect(g); g.connect(ctx.destination);
-      o.frequency.value = f;
-      g.gain.setValueAtTime(0.35, ctx.currentTime + t);
-      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + t + d);
-      o.start(ctx.currentTime + t);
-      o.stop(ctx.currentTime + t + d);
-    }
-    beep(880, 0.00, 0.12);
-    beep(660, 0.18, 0.12);
-    beep(880, 0.36, 0.18);
-  } catch(e) {}
-})();
-</script>"""
-
-    safe_msg = message.replace("<", "&lt;").replace(">", "&gt;")
-    banner = f"""{sound_js}
-<div style='
-  position:fixed;top:56px;left:50%;transform:translateX(-50%);
-  z-index:99999;width:88%;max-width:720px;
-  background:{bg};border:2px solid {color};border-radius:10px;
-  padding:13px 20px 11px;font-family:Space Mono,monospace;
-  box-shadow:0 0 28px {color}55;
-  animation:alertpulse 1.4s ease-in-out infinite;
-'>
-  <div style='font-size:13px;color:{color};font-weight:700;letter-spacing:.08em;margin-bottom:5px;'>
-    {icon} {"TP2 OPPORTUNITY — MOMENTUM STILL STRONG" if urgency=="TP2" else "EXIT ALERT — CONSIDER CLOSING YOUR POSITION"}
-  </div>
-  <div style='font-size:11px;color:#e8edf5;line-height:1.6;'>{safe_msg}</div>
-</div>
-<style>
-@keyframes alertpulse {{
-  0%,100% {{ box-shadow:0 0 18px {color}44; }}
-  50%      {{ box-shadow:0 0 36px {color}aa; }}
-}}
-</style>"""
-    st.markdown(banner, unsafe_allow_html=True)
-
-
-# ============================================================
-# LIVE
-# ============================================================
-def render_live():
-    st.markdown(f"<div style='font-family:Space Mono,monospace;font-size:18px;color:#00d4aa;letter-spacing:.12em;padding:4px 0 12px;'>◈ AI FOREX TERMINAL {APP_VERSION} ◈</div>",unsafe_allow_html=True)
-    is_open,mkt=market_is_open(symbol)
-    try:
-        df,plan=select_plan(symbol,interval,bars,TD_KEY)
-        latest=df.iloc[-1]
-        td_price=float(latest["close"])    # Twelve Data last bar close
-        prev=float(df.iloc[-2]["close"]) if len(df)>1 else td_price
-        sweep=detect_sweep(df,symbol)
-        if not is_open and norm(symbol) in FOREX_SYMBOLS:
-            plan=_empty(symbol,"closed","MARKET CLOSED")
-        plan=finalize_plan(plan,balance,risk_pct)
-    except Exception as e:
-        st.error(f"Error: {e}"); return
-
-    # ── MT5 live price (overrides Twelve Data if connected) ──
-    _ma_tok=get_ma_token(); _ma_acc=get_ma_account()
-    mt5_tick = fetch_mt5_price(symbol, _ma_tok, _ma_acc) if (_ma_tok and _ma_acc) else None
-    if mt5_tick:
-        price = mt5_tick["bid"]   # use bid as display price (what you'd get selling)
-        price_src_label = f"MT5 bid/ask {fmt_price(mt5_tick['bid'],symbol)}/{fmt_price(mt5_tick['ask'],symbol)}  spread {mt5_tick['spread_pips']}p"
-        price_src_col   = "#00d4aa"
-    else:
-        price = td_price
-        price_src_label = "Twelve Data (delayed)"
-        price_src_col   = "#f59e0b"
-    chg=price-prev; chg_pct=(chg/prev*100) if prev else 0
-
-    # ── MT5 open positions ────────────────────────────────────
-    mt5_positions = fetch_mt5_positions(_ma_tok, _ma_acc) if (_ma_tok and _ma_acc) else []
-
-    # ── Exit alert — check all open trades for the current symbol ──
-    _all_trades = st.session_state.get("active_trades", [])
-    _sym_trades  = [t for t in _all_trades if t.get("symbol", symbol) == symbol]
-    if _sym_trades:
-        # Use price already fetched for this symbol
-        _alert, _alert_msg, _alert_urg = _check_exit_alert(plan, _sym_trades[0], price, df)
-        if _alert:
-            _render_exit_alert(_alert_msg, _alert_urg)
-    else:
-        st.session_state.pop("_last_alert_hash", None)
-
-    top1,top2,top3=st.columns([2,3,1])
-    with top1: render_signal_badge(plan.direction,plan.execution_status)
-    with top2:
-        pc="#10b981" if chg>=0 else "#ef4444"
-        st.markdown(
-            f"<div style='font-family:Space Mono,monospace;font-size:22px;font-weight:700;padding-top:4px;'>"
-            f"{fmt_price(price,symbol)}"
-            f"<span style='font-size:13px;color:{pc};'> {chg:+.5f} ({chg_pct:+.3f}%)</span>"
-            f"<span style='font-size:10px;color:{price_src_col};margin-left:8px;'>{price_src_label}</span></div>",
-            unsafe_allow_html=True)
-    with top3:
-        lc="#10b981" if mkt=="LIVE" else "#f59e0b"
-        st.markdown(f"<div style='text-align:right;padding-top:8px;'><span style='font-family:Space Mono,monospace;font-size:11px;padding:4px 10px;border-radius:4px;border:1px solid rgba(255,255,255,.08);color:{lc};'>{mkt}</span></div>",unsafe_allow_html=True)
-
-    # ── MT5 positions panel ───────────────────────────────────
-    if mt5_positions:
-        pos_rows=[]
-        for p in mt5_positions:
-            sym_p=p.get("symbol","?"); typ=p.get("type","?").replace("POSITION_TYPE_","")
-            vol=p.get("volume",0); op=p.get("openPrice",0); cp=p.get("currentPrice",0)
-            profit=p.get("profit",0); sl_p=p.get("stopLoss",0); tp_p=p.get("takeProfit",0)
-            pos_rows.append({"Symbol":sym_p,"Type":typ,"Vol":vol,
-                             "Open":fmt_price(op,sym_p),"Current":fmt_price(cp,sym_p),
-                             "SL":fmt_price(sl_p,sym_p) if sl_p else "—",
-                             "TP":fmt_price(tp_p,sym_p) if tp_p else "—",
-                             "P&L":f"${profit:+.2f}"})
-        st.markdown("<div style='font-family:Space Mono,monospace;font-size:11px;color:#00d4aa;letter-spacing:.08em;margin:4px 0 2px;'>📡 MT5 OPEN POSITIONS</div>",unsafe_allow_html=True)
-        st.dataframe(pd.DataFrame(pos_rows),use_container_width=True,hide_index=True)
-
-    gc=grade_color(plan.final_grade)
-    rsi=fmt_num(latest.get("rsi14"),1)
-    rsi_col="#ef4444" if rsi!="—" and float(rsi)>70 else "#10b981" if rsi!="—" and float(rsi)<30 else "#e8edf2"
-    news_col={"HIGH":"#ef4444","MEDIUM":"#f59e0b","LOW":"#10b981"}.get(plan.news_risk,"#8b9ab0")
-    conf_col="#10b981" if plan.confluence_count>=4 else "#f59e0b" if plan.confluence_count>=2 else "#ef4444"
-    adj_col="#10b981" if plan.news_adj>0 else "#ef4444" if plan.news_adj<0 else "#8b9ab0"
-
-    def kpi(lbl,val,col="#e8edf2"):
-        return (f"<div style='background:#0d1117;border:1px solid rgba(255,255,255,0.07);border-radius:6px;padding:10px 12px;flex:1;min-width:0;'>"
-                f"<div style='font-size:10px;color:#8b9ab0;font-family:Space Mono,monospace;letter-spacing:.07em;margin-bottom:4px;white-space:nowrap;'>{lbl}</div>"
-                f"<div style='font-size:14px;font-weight:700;color:{col};font-family:Space Mono,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'>{val}</div></div>")
-
-    st.markdown(f"""<div style='display:flex;gap:8px;margin:12px 0;flex-wrap:wrap;'>
-      {kpi("STRATEGY",plan.strategy[:16],"#00d4aa")}
-      {kpi("TECH SCORE",str(plan.setup_score),grade_color(plan.setup_grade))}
-      {kpi("NEWS ADJ",("+"+str(plan.news_adj) if plan.news_adj>=0 else str(plan.news_adj)),adj_col)}
-      {kpi("FINAL SCORE",str(plan.final_score),gc)}
-      {kpi("GRADE",plan.final_grade,gc)}
-      {kpi("CONFLUENCE",f"{plan.confluence_count}/6",conf_col)}
-      {kpi("SESSION",plan.session_label[:12],"#8b9ab0")}
-      {kpi("NEWS RISK",plan.news_risk,news_col)}
-      {kpi("DIRECTION",plan.direction,"#10b981" if plan.direction=="Buy" else "#ef4444" if plan.direction=="Sell" else "#f59e0b")}
-      {kpi("R:R",fmt_rr(plan.rr),"#a78bfa")}
-      {kpi("RSI14",rsi,rsi_col)}
-      {kpi("LOT",fmt_num(plan.suggested_lot,3),"#00d4aa")}
-    </div>""",unsafe_allow_html=True)
-    st.markdown("---")
-
-    col_l,col_c,col_r=st.columns([1.05,2.2,1.15])
-    with col_l:
-        render_kv_panel("ENTRY LEVELS",[
-            ("ENTRY",fmt_price(plan.entry,symbol),"good"),("STOP LOSS",fmt_price(plan.sl,symbol),"bad"),
-            ("TP1",fmt_price(plan.tp1,symbol),"warn"),("TP2",fmt_price(plan.tp2,symbol),"good"),
-            ("TP3",fmt_price(plan.tp3,symbol),"info") if plan.tp3 else ("TP3","—","muted"),
-        ])
-        render_kv_panel("EXIT RULES",[(f"#{i+1}",r,"") for i,r in enumerate(plan.exit_conditions or ["No exit plan"])])
-        if sweep["detected"]:
-            render_kv_panel("⚠ SWEEP",[("Severity",sweep["severity"],"bad" if sweep["severity"]=="HIGH" else "warn"),("Detail",sweep["desc"],"")])
-        render_news_panel(plan)
-    with col_c:
-        st.markdown("### PRICE CHART")
-        st.plotly_chart(build_chart(df,plan,symbol),use_container_width=True)
-        st.markdown("### MARKET OVERVIEW")
-        ov=[build_overview_row(s,balance,risk_pct,TD_KEY) for s in ["EURUSD","GBPUSD","USDJPY","XAUUSD","AUDUSD","USDCAD"]]
-        st.dataframe(pd.DataFrame(ov),use_container_width=True,hide_index=True)
-    with col_r:
-        active=render_trade_tracker(plan,price,df)
-        ae,asl,ad=(active if active else (None,None,None))
-        render_score_panel(plan,df,ae,asl,ad)
-        render_kv_panel("RISK PLAN",[
-            ("Balance",f"${balance:,.2f}",""),("Risk %",f"{risk_pct:.1f}%",""),
-            ("Risk $",f"${balance*risk_pct/100:,.2f}","warn"),
-            ("Lot",fmt_num(plan.suggested_lot,3),"good"),("Status",plan.execution_status[:20],
-             "good" if plan.execution_status=="Ready to Enter" else "bad" if "HIGH NEWS" in plan.execution_status else "warn"),
-        ])
-
-# ============================================================
-# BACKTEST  (V12: equity curve + detailed stats)
-# ============================================================
-def render_backtest():
-    st.markdown("## BACKTEST ENGINE")
-    bc1,bc2,bc3,bc4=st.columns(4)
-    bt_sym=bc1.selectbox("Symbol",INTERNAL_SYMBOLS,index=3,key="bt_sym")
-    bt_int=bc2.selectbox("Interval",["15min","1h","4h"],index=0,key="bt_int")
-    bt_bal=bc3.number_input("Balance",min_value=10.0,value=500.0,step=50.0,key="bt_bal")
-    bt_rsk=bc4.number_input("Risk %",min_value=0.1,max_value=5.0,value=1.0,step=0.1,key="bt_rsk")
-    fc1,fc2=st.columns(2)
-    score_thresh=fc1.slider("Min Final Score to trade",40,90,65,5,key="bt_thresh")
-    max_bars=fc2.slider("History bars",400,1000,700,50,key="bt_bars")
-
-    if not st.button("▶ Run Backtest"): return
-    with st.spinner("Fetching data and running simulation…"):
-        try:
-            s=norm(bt_sym)
-            df=add_indicators(fetch_bars(s,bt_int,max_bars,TD_KEY))
-            results=[]
-            for i in range(220,len(df)-20):
-                chunk=df.iloc[:i+1].copy()
-                regime=get_regime(chunk)
-                if regime=="insufficient": continue
-                if regime in("trend_up","trend_down"):
-                    plan=_trend_plan(chunk,s,regime,"neutral")
-                elif regime=="squeeze":
-                    plan=_squeeze_plan(chunk,s)
-                else:
-                    plan=_mean_rev_plan(chunk,s,regime)
-                # Apply score threshold
-                if plan.execution_status!="Ready to Enter" or plan.entry is None: continue
-                if plan.setup_score<score_thresh: continue
-                future=df.iloc[i+1:i+21]; outcome=None; er=None
-                for _,row in future.iterrows():
-                    if plan.direction=="Buy":
-                        if row["low"]<=plan.sl:      outcome=-1.0;er="SL";break
-                        if row["high"]>=plan.tp1:    outcome=abs(plan.tp1-plan.entry)/max(abs(plan.entry-plan.sl),1e-9);er="TP1";break
-                    else:
-                        if row["high"]>=plan.sl:     outcome=-1.0;er="SL";break
-                        if row["low"]<=plan.tp1:     outcome=abs(plan.entry-plan.tp1)/max(abs(plan.sl-plan.entry),1e-9);er="TP1";break
-                if outcome is None:
-                    lc=float(future.iloc[-1]["close"])
-                    outcome=(lc-plan.entry)/max(abs(plan.entry-plan.sl),1e-9) if plan.direction=="Buy" else (plan.entry-lc)/max(abs(plan.sl-plan.entry),1e-9)
-                    er="Time"
-                pnl=outcome*bt_bal*(bt_rsk/100)
-                results.append({"time":chunk.iloc[-1]["time"],"symbol":s,"direction":plan.direction,
-                                 "strategy":plan.strategy,"grade":plan.setup_grade,"score":plan.setup_score,
-                                 "regime":plan.regime,"r_mult":round(outcome,3),"pnl":round(pnl,2),
-                                 "exit":er,"entry":plan.entry,"sl":plan.sl,"tp1":plan.tp1,
-                                 "session":plan.session_label[:12]})
-            tdf=pd.DataFrame(results)
-        except Exception as e:
-            st.error(f"Backtest error: {e}"); return
-
-    if tdf.empty: st.warning("No trades generated at this score threshold."); return
-    tdf["cum_pnl"]=tdf["pnl"].cumsum()
-    tdf["win"]=(tdf["pnl"]>0).astype(int)
-
-    # ── Top metrics ──────────────────────────────────────────
-    wins=tdf["win"].sum(); losses=len(tdf)-wins
-    wr=wins/len(tdf)*100
-    gross_p=tdf[tdf["pnl"]>0]["pnl"].sum(); gross_l=abs(tdf[tdf["pnl"]<0]["pnl"].sum())
-    pf=gross_p/max(gross_l,1e-9)
-    avg_win=tdf[tdf["pnl"]>0]["r_mult"].mean() if wins>0 else 0
-    avg_loss=tdf[tdf["pnl"]<0]["r_mult"].mean() if losses>0 else 0
-    net=tdf["pnl"].sum()
-    # Max drawdown
-    peak=tdf["cum_pnl"].cummax(); dd=(tdf["cum_pnl"]-peak)
-    max_dd=dd.min(); max_dd_pct=max_dd/bt_bal*100
-    # Consecutive losses
-    streak=consec=0
-    for w in tdf["win"]:
-        if w==0: streak+=1; consec=max(consec,streak)
-        else: streak=0
-    avg_r=tdf["r_mult"].mean()
-
-    m1,m2,m3,m4,m5,m6,m7,m8=st.columns(8)
-    m1.metric("Trades",len(tdf)); m2.metric("Win Rate",f"{wr:.1f}%")
-    m3.metric("Profit Factor",f"{pf:.2f}"); m4.metric("Net PnL",f"${net:,.2f}")
-    m5.metric("Max Drawdown",f"${max_dd:,.2f} ({max_dd_pct:.1f}%)")
-    m6.metric("Avg R",f"{avg_r:.2f}"); m7.metric("Avg Win R",f"{avg_win:.2f}")
-    m8.metric("Max Consec Loss",str(consec))
-
-    # ── Equity Curve ─────────────────────────────────────────
-    st.markdown("### EQUITY CURVE")
-    fig_eq=go.Figure()
-    fig_eq.add_trace(go.Scatter(x=tdf["time"],y=tdf["cum_pnl"]+bt_bal,mode="lines",name="Equity",
-                                 line=dict(color="#00d4aa",width=2),fill="tozeroy",
-                                 fillcolor="rgba(0,212,170,0.06)"))
-    fig_eq.add_hline(y=bt_bal,line=dict(color="#8b9ab0",width=1,dash="dot"),annotation_text="Start")
-    fig_eq.update_layout(template="plotly_dark",height=260,margin=dict(l=8,r=8,t=8,b=8),
-                          yaxis_title="Equity (USD)")
-    st.plotly_chart(fig_eq,use_container_width=True)
-
-    # ── Stats by Grade ────────────────────────────────────────
-    st.markdown("### PERFORMANCE BY GRADE")
-    grade_stats=[]
-    for g in ["A+","A","B","C","D"]:
-        sub=tdf[tdf["grade"]==g]
-        if sub.empty: continue
-        sw=sub["win"].sum(); sn=len(sub)
-        grade_stats.append({"Grade":g,"Trades":sn,"Win Rate":f"{sw/sn*100:.0f}%",
-                             "Avg R":f"{sub['r_mult'].mean():.2f}","Net PnL":f"${sub['pnl'].sum():.2f}",
-                             "Profit Factor":f"{sub[sub['pnl']>0]['pnl'].sum()/max(abs(sub[sub['pnl']<0]['pnl'].sum()),1e-9):.2f}"})
-    if grade_stats: st.dataframe(pd.DataFrame(grade_stats),use_container_width=True,hide_index=True)
-
-    # ── Stats by Strategy ─────────────────────────────────────
-    st.markdown("### PERFORMANCE BY STRATEGY")
-    strat_stats=[]
-    for st_name in tdf["strategy"].unique():
-        sub=tdf[tdf["strategy"]==st_name]
-        sw=sub["win"].sum(); sn=len(sub)
-        strat_stats.append({"Strategy":st_name,"Trades":sn,"Win Rate":f"{sw/sn*100:.0f}%",
-                             "Avg R":f"{sub['r_mult'].mean():.2f}","Net PnL":f"${sub['pnl'].sum():.2f}"})
-    if strat_stats: st.dataframe(pd.DataFrame(strat_stats),use_container_width=True,hide_index=True)
-
-    # ── Stats by Exit Type ────────────────────────────────────
-    st.markdown("### EXIT TYPE BREAKDOWN")
-    exit_stats=[]
-    for ex in tdf["exit"].unique():
-        sub=tdf[tdf["exit"]==ex]
-        exit_stats.append({"Exit":ex,"Count":len(sub),"Avg R":f"{sub['r_mult'].mean():.2f}",
-                            "Net PnL":f"${sub['pnl'].sum():.2f}"})
-    if exit_stats: st.dataframe(pd.DataFrame(exit_stats),use_container_width=True,hide_index=True)
-
-    # ── R Distribution Chart ──────────────────────────────────
-    st.markdown("### R-MULTIPLE DISTRIBUTION")
-    fig_r=go.Figure(go.Histogram(x=tdf["r_mult"],nbinsx=30,
-                                   marker_color=["#10b981" if v>=0 else "#ef4444" for v in tdf["r_mult"]],
-                                   name="R Distribution"))
-    fig_r.add_vline(x=0,line=dict(color="#8b9ab0",width=1,dash="dot"))
-    fig_r.add_vline(x=avg_r,line=dict(color="#00d4aa",width=1.5,dash="dot"),annotation_text=f"Avg {avg_r:.2f}R")
-    fig_r.update_layout(template="plotly_dark",height=220,margin=dict(l=8,r=8,t=8,b=8))
-    st.plotly_chart(fig_r,use_container_width=True)
-
-    # ── Full trade log ────────────────────────────────────────
-    with st.expander("📋 Full Trade Log"):
-        st.dataframe(tdf.drop(columns=["win","cum_pnl"]),use_container_width=True,hide_index=True)
-        st.download_button("⬇ Download CSV",tdf.to_csv(index=False).encode(),"backtest_v12.csv","text/csv")
-
-# ============================================================
-# JOURNAL VIEW
-# ============================================================
-def render_journal():
-    st.markdown("<div style='font-family:Space Mono,monospace;font-size:18px;color:#00d4aa;letter-spacing:.12em;padding:4px 0 12px;'>◈ TRADE JOURNAL ◈</div>",unsafe_allow_html=True)
-    j = load_journal()
-
-    if not j:
-        st.info("No trades logged yet. Enter a live trade and close it to start recording.")
+    if not _sb_ok():
+        st.warning("Supabase not connected. Add SUPABASE_URL and SUPABASE_KEY to your secrets.")
         return
 
-    # ── Summary KPIs ──────────────────────────────────────────
-    s = journal_stats(j)
-    wr_col = "#10b981" if s["wr"]>=55 else "#f59e0b" if s["wr"]>=45 else "#ef4444"
-    pf_val = s["pf"]; pf_col = "#10b981" if str(pf_val)=="∞" or float(str(pf_val).replace("∞","999"))>=1.5 else "#f59e0b"
-    r_col  = "#10b981" if s["total_r"]>=0 else "#ef4444"
-    def kpi2(l,v,c): return (f"<div style='background:#0d1117;border:1px solid rgba(255,255,255,0.07);border-radius:6px;padding:10px 14px;'>"
-                             f"<div style='font-size:10px;color:#8b9ab0;font-family:Space Mono,monospace;letter-spacing:.07em;'>{l}</div>"
-                             f"<div style='font-size:16px;font-weight:700;color:{c};font-family:Space Mono,monospace;'>{v}</div></div>")
-    wr_str  = f"{s['wr']:.0f}%"
-    r_str   = f"{s['total_r']:+.1f}R"
-    avg_str = f"{s['avg_r']:+.2f}R"
-    kpi_html=("<div style='display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:16px;'>"
-              +kpi2('TRADES',s['total'],'#e8edf2')
-              +kpi2('WIN RATE',wr_str,wr_col)
-              +kpi2('TOTAL R',r_str,r_col)
-              +kpi2('AVG R / TRADE',avg_str,r_col)
-              +kpi2('PROFIT FACTOR',str(pf_val),pf_col)
-              +"</div>")
-    st.markdown(kpi_html,unsafe_allow_html=True)
+    # ── Import MT5 History via MetaApi (owner only) ────────────
+    if _is_owner() or get_ma_token():
+      with st.expander("📥 Import MT5 History (one-time setup)"):
+        st.markdown("<div style='font-size:12px;color:#8b9ab0;margin-bottom:8px;'>"
+                    "Click the button below to import your complete MT5 trade history "
+                    "directly from MetaApi. This only needs to be done once.</div>",
+                    unsafe_allow_html=True)
+        days_back = st.number_input("Import how many days back?", min_value=7, max_value=365, value=30, key="imp_days")
+        if st.button("📥 Import from MetaApi", key="btn_import_ma"):
+            ma_tok = get_ma_token(); ma_acc = get_ma_account()
+            if not ma_tok or not ma_acc:
+                st.error("MetaApi not connected. Add token and account ID first.")
+            else:
+                with st.spinner(f"Fetching {days_back} days of MT5 history…"):
+                    deals = fetch_mt5_history_deals(ma_tok, ma_acc, since_hours=days_back*24)
+                if not deals:
+                    st.warning("No deals found. Check MetaApi connection.")
+                else:
+                    # Group deals by positionId to match IN/OUT pairs
+                    positions = {}
+                    for d in deals:
+                        pid = str(d.get("positionId",""))
+                        if not pid: continue
+                        entry_type = d.get("entryType","")
+                        if pid not in positions: positions[pid] = {}
+                        if "IN" in entry_type: positions[pid]["in"] = d
+                        elif "OUT" in entry_type: positions[pid]["out"] = d
 
-    # ── AI Insights ───────────────────────────────────────────
-    st.markdown("<div style='font-family:Space Mono,monospace;font-size:13px;color:#00d4aa;letter-spacing:.08em;margin-bottom:8px;'>🤖 AI INSIGHTS — self-learned from your trades</div>",unsafe_allow_html=True)
-    ins_html="<div style='background:#0d1117;border:1px solid rgba(0,212,170,0.2);border-radius:8px;padding:12px 16px;margin-bottom:16px;'>"
-    for tip in journal_insights(j):
-        ins_html+=f"<div style='font-size:12px;color:#e8edf5;font-family:Space Mono,monospace;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.04);'>{tip}</div>"
-    ins_html+="</div>"
-    st.markdown(ins_html,unsafe_allow_html=True)
+                    # Check existing tickets to avoid duplicates
+                    existing = sb_get("journal")
+                    existing_tickets = {j.get("mt5_ticket","") for j in existing}
 
-    # ── Breakdown tabs ────────────────────────────────────────
-    tb1,tb2,tb3,tb4=st.tabs(["By Grade","By Session","By News","Score Heatmap"])
-    def _bar_chart(labels,win_rates,counts,title):
-        colors=["#10b981" if w>=55 else "#f59e0b" if w>=45 else "#ef4444" for w in win_rates]
-        fig=go.Figure(go.Bar(x=labels,y=win_rates,marker_color=colors,
-                             text=[f"{w:.0f}%<br>n={n}" for w,n in zip(win_rates,counts)],
-                             textposition="outside"))
-        fig.add_hline(y=50,line=dict(color="#8b9ab0",dash="dot",width=1))
-        fig.update_layout(title=title,yaxis_title="Win Rate %",yaxis_range=[0,105],
-                          plot_bgcolor="#0d1117",paper_bgcolor="#0d1117",
-                          font=dict(color="#e8edf2"),height=260,margin=dict(t=40,b=20))
-        return fig
-    with tb1:
-        gs=s["grade_s"]
-        if gs:
-            st.plotly_chart(_bar_chart(list(gs.keys()),[v["wr"] for v in gs.values()],[v["n"] for v in gs.values()],"Win Rate by Grade"),use_container_width=True)
-        else: st.info("Not enough grade data yet.")
-    with tb2:
-        ss=s["sess_s"]
-        if ss:
-            st.plotly_chart(_bar_chart(list(ss.keys()),[v["wr"] for v in ss.values()],[v["n"] for v in ss.values()],"Win Rate by Session"),use_container_width=True)
-        else: st.info("Not enough session data yet.")
-    with tb3:
-        ns=s["news_s"]
-        if ns:
-            st.plotly_chart(_bar_chart(list(ns.keys()),[v["wr"] for v in ns.values()],[v["n"] for v in ns.values()],"Win Rate by News Risk"),use_container_width=True)
-        else: st.info("Not enough news data yet.")
-    with tb4:
-        sc=s["score_s"]
-        if sc:
-            buckets=sorted(sc.keys()); labels=[f"{b}-{b+9}" for b in buckets]
-            st.plotly_chart(_bar_chart(labels,[sc[b]["wr"] for b in buckets],[sc[b]["n"] for b in buckets],"Win Rate by Score Range"),use_container_width=True)
-        else: st.info("Not enough score data yet.")
+                    imported = 0; skipped = 0
+                    for pid, pair in positions.items():
+                        if "in" not in pair or "out" not in pair:
+                            skipped += 1; continue
+                        if f"hist_{pid}" in existing_tickets:
+                            skipped += 1; continue  # already imported
+                        din  = pair["in"]; dout = pair["out"]
+                        sym  = norm(din.get("symbol","")).replace(".R","").replace(".r","")
+                        dir_ = "Buy" if "BUY" in din.get("type","").upper() else "Sell"
+                        entry_p = float(din.get("price",0))
+                        exit_p  = float(dout.get("price",0))
+                        profit  = float(dout.get("profit",0))
+                        lot     = float(din.get("volume",0.01))
+                        sl_val  = float(din.get("stopLoss",0) or 0)
+                        tp_val  = float(din.get("takeProfit",0) or 0)
+                        # Calculate R
+                        risk = abs(entry_p - sl_val) if sl_val else 1
+                        move = (exit_p - entry_p) if dir_=="Buy" else (entry_p - exit_p)
+                        pnl_r = round(move/risk, 2) if risk > 0 else 0
+                        outcome = "WIN" if profit > 0 else ("LOSS" if profit < 0 else "BREAKEVEN")
+                        sb_insert("journal", {
+                            "mt5_ticket": f"hist_{pid}",
+                            "symbol": sym, "direction": dir_,
+                            "entry": entry_p, "exit_price": exit_p,
+                            "sl": sl_val, "tp1": tp_val, "lot": lot,
+                            "pnl_r": pnl_r, "pnl_usd": profit,
+                            "outcome": outcome, "grade": "HISTORY",
+                            "score": 0,
+                            "opened_at": din.get("time",""),
+                            "notes": f"MetaApi import"
+                        })
+                        imported += 1
+                    st.success(f"✅ Imported {imported} trades. Skipped {skipped}.")
+                    if imported > 0: st.rerun()
 
-    # ── Equity curve (running R) ──────────────────────────────
-    st.markdown("### EQUITY CURVE (R-multiples)")
-    df_j=pd.DataFrame(j)
-    df_j["cum_r"]=df_j["pnl_r"].cumsum()
-    fig_eq=go.Figure()
-    fig_eq.add_trace(go.Scatter(x=list(range(1,len(df_j)+1)),y=df_j["cum_r"],
-        mode="lines+markers",name="Cumulative R",
-        line=dict(color="#00d4aa",width=2),
-        marker=dict(color=["#10b981" if r>0 else "#ef4444" for r in df_j["pnl_r"]],size=7)))
-    fig_eq.add_hline(y=0,line=dict(color="#8b9ab0",dash="dot",width=1))
-    fig_eq.update_layout(plot_bgcolor="#0d1117",paper_bgcolor="#0d1117",
-                         font=dict(color="#e8edf2"),height=280,margin=dict(t=20,b=20),
-                         xaxis_title="Trade #",yaxis_title="Cumulative R")
-    st.plotly_chart(fig_eq,use_container_width=True)
+    journal = sb_get("journal", "order=closed_at.desc")
+    signals = sb_get("signals", "order=recorded_at.desc&limit=200")
 
-    # ── Full trade log ────────────────────────────────────────
-    st.markdown("### TRADE LOG")
-    display_cols=["id","ts","symbol","dir","entry","sl","exit","result","pnl_r","grade","final","news_risk","session","notes"]
-    df_display=df_j[[c for c in display_cols if c in df_j.columns]].copy()
-    df_display.columns=[c.upper() for c in df_display.columns]
-    st.dataframe(df_display,use_container_width=True,hide_index=True)
+    # ── Stats cards ──────────────────────────────────────────
+    if not journal:
+        st.info("No closed trades yet. Once MT5 positions close, they'll appear here automatically.")
+    else:
+        df = pd.DataFrame(journal)
+        df["pnl_r"] = pd.to_numeric(df["pnl_r"], errors="coerce").fillna(0)
+        total  = len(df)
+        wins   = len(df[df["outcome"]=="WIN"])
+        losses = len(df[df["outcome"]=="LOSS"])
+        wr     = round(wins/total*100, 1) if total else 0
+        avg_r  = round(df["pnl_r"].mean(), 2)
+        total_r= round(df["pnl_r"].sum(), 2)
+        best   = df.loc[df["pnl_r"].idxmax()] if total else None
+        worst  = df.loc[df["pnl_r"].idxmin()] if total else None
 
-    # Download + delete
-    dc1,dc2=st.columns(2)
-    dc1.download_button("⬇ Export CSV",df_j.to_csv(index=False).encode(),"trade_journal.csv","text/csv")
-    if dc2.button("🗑 Clear All Trades"):
-        st.session_state["_confirm_clear"]=True
-    if st.session_state.get("_confirm_clear"):
-        st.warning("Are you sure? This will delete all trade history.")
-        cc1,cc2=st.columns(2)
-        if cc1.button("Yes, delete all"):
-            save_journal([]); st.session_state.pop("_confirm_clear",None)
-            st.success("Journal cleared."); st.rerun()
-        if cc2.button("Cancel"):
-            st.session_state.pop("_confirm_clear",None); st.rerun()
+        def stat(lbl, val, col):
+            return (f"<div style='background:#0d1117;border:1px solid rgba(255,255,255,0.08);"
+                    f"border-radius:8px;padding:14px;flex:1;min-width:100px;text-align:center;'>"
+                    f"<div style='font-size:9px;color:#8b9ab0;font-family:Space Mono,monospace;"
+                    f"letter-spacing:.08em;margin-bottom:6px;'>{lbl}</div>"
+                    f"<div style='font-size:22px;font-weight:700;color:{col};font-family:Space Mono,monospace;'>{val}</div></div>")
 
+        st.markdown(
+            f"<div style='display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;'>"
+            f"{stat('TOTAL TRADES', total, '#e8edf2')}"
+            f"{stat('WIN RATE', f'{wr}%', '#10b981' if wr>=50 else '#ef4444')}"
+            f"{stat('AVG R', f'{avg_r:+.2f}R', '#10b981' if avg_r>0 else '#ef4444')}"
+            f"{stat('TOTAL R', f'{total_r:+.2f}R', '#10b981' if total_r>0 else '#ef4444')}"
+            f"{stat('WINS', wins, '#10b981')}"
+            f"{stat('LOSSES', losses, '#ef4444')}"
+            f"</div>", unsafe_allow_html=True)
+
+        # By symbol breakdown
+        st.markdown("<div class='mono-title'>BY SYMBOL</div>", unsafe_allow_html=True)
+        sym_stats = df.groupby("symbol").agg(
+            Trades=("pnl_r","count"),
+            WinRate=("outcome", lambda x: round((x=="WIN").sum()/len(x)*100,1)),
+            AvgR=("pnl_r","mean"),
+            TotalR=("pnl_r","sum")
+        ).round(2).reset_index()
+        st.dataframe(sym_stats, use_container_width=True, hide_index=True)
+
+        # Recent trades table
+        st.markdown("<div class='mono-title' style='margin-top:12px;'>RECENT TRADES</div>", unsafe_allow_html=True)
+        cols = ["symbol","direction","entry","exit_price","pnl_r","pnl_usd","outcome","grade","closed_at"]
+        show_cols = [c for c in cols if c in df.columns]
+        st.dataframe(df[show_cols].head(20), use_container_width=True, hide_index=True)
+
+        # ── AI Habit Analysis ─────────────────────────────────
+        st.markdown("---")
+        st.markdown("<div class='mono-title'>🤖 AI HABIT ANALYSIS</div>", unsafe_allow_html=True)
+
+        if st.button("🤖 Analyze My Trading Habits (Grok)", key="btn_habit"):
+            key = get_xai_key()
+            if not key:
+                st.error("No xAI key configured.")
+            else:
+                # Build summary for Grok
+                by_sym  = sym_stats.to_string(index=False)
+                by_dir  = df.groupby("direction")["pnl_r"].agg(["count","mean","sum"]).round(2).to_string()
+                by_out  = df["outcome"].value_counts().to_string()
+                top3_w  = df[df["outcome"]=="WIN"].nlargest(3,"pnl_r")[["symbol","direction","pnl_r","grade"]].to_string(index=False)
+                top3_l  = df[df["outcome"]=="LOSS"].nsmallest(3,"pnl_r")[["symbol","direction","pnl_r","grade"]].to_string(index=False)
+                msg = (
+                    f"FOREX TRADER PERFORMANCE REVIEW\n"
+                    f"Total trades: {total} | Win rate: {wr}% | Avg R: {avg_r} | Total R: {total_r}\n\n"
+                    f"BY SYMBOL:\n{by_sym}\n\n"
+                    f"BY DIRECTION:\n{by_dir}\n\n"
+                    f"OUTCOMES:\n{by_out}\n\n"
+                    f"TOP 3 WINS:\n{top3_w}\n\n"
+                    f"TOP 3 LOSSES:\n{top3_l}\n\n"
+                    f"Please analyze this trader's habits and provide:\n"
+                    f"1. STRENGTHS: What they're doing well\n"
+                    f"2. WEAKNESSES: Patterns in their losses\n"
+                    f"3. BEST SETUP: Which symbol/direction/session works best for them\n"
+                    f"4. ADVICE: 3 specific actionable improvements\n"
+                    f"Be direct and specific. Use the data to back up every point."
+                )
+                with st.spinner("Grok is analyzing your trading habits…"):
+                    analysis = _grok([
+                        {"role":"system","content":"You are an elite forex trading coach analyzing a student's real trade history. UTC: "+pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M")},
+                        {"role":"user","content":msg}
+                    ], max_tokens=600, temperature=0.3, api_key=key) or "No response."
+                st.session_state["habit_analysis"] = analysis
+
+        if st.session_state.get("habit_analysis"):
+            st.markdown(
+                f"<div class='ai-bubble'>"
+                f"<div style='font-size:10px;color:#6366f1;font-family:Space Mono,monospace;"
+                f"letter-spacing:.08em;margin-bottom:8px;'>🤖 GROK HABIT ANALYSIS</div>"
+                + st.session_state["habit_analysis"].replace("\n","<br>") +
+                f"</div>", unsafe_allow_html=True)
+
+    # ── Signal history ────────────────────────────────────────
+    if signals:
+        st.markdown("---")
+        st.markdown("<div class='mono-title'>SIGNAL HISTORY</div>", unsafe_allow_html=True)
+        df_s = pd.DataFrame(signals)
+        if "ai_confirmed" in df_s.columns:
+            confirmed = df_s["ai_confirmed"].sum()
+            total_s   = len(df_s)
+            st.markdown(
+                f"<div style='font-size:12px;color:#8b9ab0;margin-bottom:8px;'>"
+                f"Last {total_s} signals · AI confirmed: <b style='color:#10b981;'>{confirmed}</b> · "
+                f"Rejected: <b style='color:#ef4444;'>{total_s-confirmed}</b></div>",
+                unsafe_allow_html=True)
+        show_s = [c for c in ["symbol","direction","grade","score","ai_confirmed","session","rsi","recorded_at"] if c in df_s.columns]
+        st.dataframe(df_s[show_s].head(50), use_container_width=True, hide_index=True)
+
+# ============================================================
+# PAGE — WEEKEND PRE-MARKET ANALYSIS
+# ============================================================
+def page_weekend():
+    st.markdown("<div style='font-family:Space Mono,monospace;font-size:18px;color:#00d4aa;"
+                "letter-spacing:.12em;padding:4px 0 16px;'>◈ WEEKEND PRE-MARKET ANALYSIS</div>",
+                unsafe_allow_html=True)
+
+    st.markdown("<div style='font-size:12px;color:#8b9ab0;margin-bottom:16px;'>"
+                "Analyze upcoming economic events and weekend news to prepare for Monday's open.</div>",
+                unsafe_allow_html=True)
+
+    # Fetch economic calendar for all symbols
+    te_key = get_te_key()
+
+    if st.button("🔮 Generate Pre-Market Analysis (Grok)", key="btn_premarket"):
+        key = get_xai_key()
+        if not key:
+            st.error("No xAI key configured.")
+            return
+
+        # Gather economic calendar data if available
+        cal_text = ""
+        if te_key:
+            events = fetch_te_calendar(te_key)
+            if events:
+                ev_lines = []
+                for e in events[:20]:
+                    imp_icon = "HIGH" if e["importance"]=="HIGH" else e["importance"]
+                    ev_lines.append(f"  {e['date'].strftime('%a %d %H:%M UTC')} [{e['country'].title()}] "
+                                    f"[{imp_icon}] {e['event']}")
+                cal_text = "\n".join(ev_lines)
+
+        # Build prompt for Grok
+        now_utc = pd.Timestamp.utcnow()
+        symbols_list = ", ".join(ACTIVE_SYMBOLS)
+
+        msg = (
+            f"WEEKEND PRE-MARKET ANALYSIS — Prepare for Monday's open\n"
+            f"Current time: {now_utc.strftime('%Y-%m-%d %H:%M UTC')} ({now_utc.strftime('%A')})\n"
+            f"Symbols I trade: {symbols_list}\n\n"
+        )
+        if cal_text:
+            msg += f"UPCOMING ECONOMIC CALENDAR (next 3 days):\n{cal_text}\n\n"
+
+        # Add historical context if available
+        hist_summary = ""
+        if _sb_ok():
+            journal = sb_get("journal", "order=closed_at.desc&limit=50")
+            if journal:
+                df_j = pd.DataFrame(journal)
+                df_j["pnl_r"] = pd.to_numeric(df_j["pnl_r"], errors="coerce").fillna(0)
+                by_sym = df_j.groupby("symbol").agg(
+                    trades=("pnl_r","count"),
+                    wr=("outcome", lambda x: f"{(x=='WIN').sum()}/{len(x)}"),
+                    avg_r=("pnl_r","mean")
+                ).round(2)
+                hist_summary = f"\nMY RECENT PERFORMANCE (last 50 trades):\n{by_sym.to_string()}\n"
+
+        msg += hist_summary
+        msg += (
+            f"\nPlease provide:\n"
+            f"1. MARKET OUTLOOK: Key themes driving markets this week (USD strength/weakness, "
+            f"risk sentiment, central bank expectations)\n"
+            f"2. HIGH-IMPACT EVENTS: Which economic events to watch and their expected impact "
+            f"on my symbols (with exact event times)\n"
+            f"3. SYMBOL-BY-SYMBOL BIAS: For each of my symbols, give a BULLISH/BEARISH/NEUTRAL "
+            f"bias with 1-sentence reasoning\n"
+            f"4. TRADE PLAN: Top 3 symbols + directions to watch for. Explain the setup "
+            f"and catalyst — do NOT include specific price levels (our system calculates "
+            f"Entry/SL/TP automatically from live data)\n"
+            f"5. RISK WARNINGS: Any major risks or events that could cause unexpected moves\n"
+            f"6. PERSONAL ADVICE: Based on my recent performance data, which symbols and "
+            f"directions should I focus on or avoid?\n\n"
+            f"IMPORTANT: Do NOT provide specific price numbers for entry, SL, TP, or support/resistance. "
+            f"You do not have access to live prices and your price data is outdated. "
+            f"Focus on DIRECTION, EVENTS, TIMING, and RISK only. Our system handles price levels."
+        )
+
+        with st.spinner("🔮 Grok is analyzing weekend news and upcoming events…"):
+            analysis = _grok([
+                {"role":"system","content":
+                 "You are an elite forex market analyst preparing a weekly pre-market brief. "
+                 "Use the trader's personal performance data to give personalised recommendations. "
+                 "CRITICAL: Never output specific price levels (entry, SL, TP, support, resistance) — "
+                 "you do not have live price access and your data is outdated. "
+                 "Focus on direction, events, timing, catalysts, and risk. "
+                 f"UTC: {now_utc.strftime('%Y-%m-%d %H:%M')}"},
+                {"role":"user","content":msg}
+            ], max_tokens=1200, temperature=0.3, api_key=key) or "No response."
+        st.session_state["premarket_analysis"] = analysis
+
+    if st.session_state.get("premarket_analysis"):
+        st.markdown(
+            f"<div class='ai-bubble'>"
+            f"<div style='font-size:10px;color:#6366f1;font-family:Space Mono,monospace;"
+            f"letter-spacing:.08em;margin-bottom:8px;'>🔮 GROK PRE-MARKET BRIEF</div>"
+            + st.session_state["premarket_analysis"].replace("\n","<br>") +
+            f"</div>", unsafe_allow_html=True)
+
+    # Economic calendar display
+    if te_key:
+        st.markdown("---")
+        st.markdown("<div class='mono-title'>📅 UPCOMING ECONOMIC CALENDAR</div>", unsafe_allow_html=True)
+        events = fetch_te_calendar(te_key)
+        if events:
+            ev_rows = []
+            for e in events[:30]:
+                imp_icon = "🔴" if e["importance"]=="HIGH" else ("🟡" if e["importance"]=="MEDIUM" else "⚪")
+                ev_rows.append({
+                    "Time": e["date"].strftime("%a %d %H:%M"),
+                    "Impact": imp_icon + " " + e["importance"],
+                    "Country": e["country"].title(),
+                    "Event": e["event"],
+                    "Forecast": str(e.get("forecast","")) if e.get("forecast") else "—",
+                    "Previous": str(e.get("previous","")) if e.get("previous") else "—",
+                })
+            st.dataframe(pd.DataFrame(ev_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No upcoming events found.")
+    else:
+        st.info("Add Trading Economics API key in sidebar to see economic calendar.")
+
+def render_sidebar():
+    with st.sidebar:
+        st.markdown("<div style='font-family:Space Mono,monospace;font-size:12px;color:#00d4aa;letter-spacing:.1em;padding:8px 0;'>ALPHA EDGE AI<br><span style='color:#4a5568;'>V14.0 — Multi-User</span></div>", unsafe_allow_html=True)
+
+        # ── User Profile (if authenticated) ──
+        if _AUTH_AVAILABLE and is_logged_in():
+            _email = get_current_email()
+            _short = _email.split("@")[0] if _email else "User"
+            st.markdown(f"<div style='font-size:11px;color:#8b9ab0;font-family:Space Mono,monospace;padding:4px 0;'>👤 {_short}</div>", unsafe_allow_html=True)
+            if st.button("🚪 Logout", key="logout_btn", use_container_width=True):
+                tok = st.session_state.get("auth_access_token", "")
+                if tok:
+                    sign_out(tok)
+                clear_session()
+                st.rerun()
+            st.markdown("---")
+
+        # ── Navigation ──
+        page_options = ["🏠  Overview","🔮  Pre-Market"] + [f"💱  {s}" for s in ACTIVE_SYMBOLS] + ["📊  Trades & Journal","📈  Performance","🔬  Backtest"]
+        page = st.radio("", page_options, key="page_sel", label_visibility="collapsed")
+
+        st.markdown("---")
+
+        # ── Auto-refresh ──
+        if st_autorefresh:
+            ref_int = st.selectbox("Auto-refresh (s)", [0,30,60,120],
+                                   format_func=lambda x:"Off" if x==0 else f"{x}s",
+                                   index=0, key="ref_int")
+            if ref_int > 0:
+                st_autorefresh(interval=ref_int*1000, key="autoref")
+            st.markdown(f"<div style='font-size:10px;color:#4a5568;font-family:Space Mono,monospace;'>"
+                        f"Price: live · Analysis: 5min cache</div>", unsafe_allow_html=True)
+
+        # ── Overview interval ──
+        ov_int_label = st.selectbox("Overview Interval", list(INTERVAL_OPTIONS.keys()), index=1, key="ov_int_sel")
+        st.session_state["ov_interval"] = INTERVAL_OPTIONS[ov_int_label]
+
+        st.markdown("---")
+        st.markdown("<div style='font-size:11px;color:#8b9ab0;font-family:Space Mono,monospace;margin-bottom:4px;'>API KEYS</div>", unsafe_allow_html=True)
+
+        # Twelve Data
+        _td = st.text_input("Twelve Data", value=st.session_state.get("td_key",_ENV_TD),
+                            type="password", key="td_inp", placeholder="paste key…")
+        if _td: st.session_state["td_key"] = _td
+
+        # xAI Grok
+        _xai = st.text_input("xAI Grok", value=st.session_state.get("xai_key",_ENV_XAI),
+                             type="password", key="xai_inp", placeholder="paste key…")
+        if _xai: st.session_state["xai_key"] = _xai
+
+        _gm = st.selectbox("Grok Model", _GROK_MODELS, index=0, key="grok_model_sel")
+
+        # Trading Economics
+        _te = st.text_input("Trading Economics", value=st.session_state.get("te_key",_ENV_TE),
+                            type="password", key="te_inp", placeholder="paste TE key…")
+        if _te: st.session_state["te_key"] = _te
+
+        td_ok  = "✅" if get_td_key()  else "❌"
+        xai_ok = "✅" if get_xai_key() else "❌"
+        te_ok  = "✅" if get_te_key()  else "❌"
+        st.markdown(f"<div style='font-size:11px;color:#4a5568;font-family:Space Mono,monospace;'>{td_ok} TD &nbsp; {xai_ok} xAI ({_gm[:14]}) &nbsp; {te_ok} TE</div>", unsafe_allow_html=True)
+
+        st.markdown("---")
+        st.markdown("<div style='font-size:11px;color:#00d4aa;font-family:Space Mono,monospace;margin-bottom:4px;'>MT5 LIVE (MetaApi)</div>", unsafe_allow_html=True)
+
+        # MT5 live prices powered by platform — show status to all users
+        _price_connected = bool(get_ma_token_price() and get_ma_account_price())
+        st.markdown(f"<div style='font-size:11px;color:#4a5568;font-family:Space Mono,monospace;'>{'✅' if _price_connected else '❌'} Live MT5 Prices</div>", unsafe_allow_html=True)
+
+        # MT5 credentials management — OWNER ONLY
+        if _is_owner():
+            _ma_tok = st.text_input("MetaApi Token", value=st.session_state.get("ma_token",""),
+                                    type="password", key="ma_tok_inp")
+            _ma_acc = st.text_input("Account ID", value=st.session_state.get("ma_account",""), key="ma_acc_inp")
+            _ma_sfx = st.text_input("Symbol suffix", value=st.session_state.get("ma_sym_suffix",""),
+                                    key="ma_sfx_inp", placeholder=".r for FP Markets Raw")
+            if _ma_tok: st.session_state["ma_token"]     = _ma_tok
+            if _ma_acc: st.session_state["ma_account"]   = _ma_acc
+            st.session_state["ma_sym_suffix"] = _ma_sfx
+
+            mab1, mab2 = st.columns(2)
+            if mab1.button("🔌 Test MT5"):
+                with st.spinner("Testing..."):
+                    ok, msg = test_mt5_connection(get_ma_token(), get_ma_account())
+                st.session_state["ma_test_result"] = (ok, msg)
+            if mab2.button("▶ Deploy"):
+                with st.spinner("Deploying..."):
+                    ok, msg = deploy_mt5_account(get_ma_token(), get_ma_account())
+                st.session_state["ma_test_result"] = (ok, msg)
+
+            # Persist test/deploy result so it doesn't disappear on rerun
+            if "ma_test_result" in st.session_state:
+                ok, msg = st.session_state["ma_test_result"]
+                (st.success if ok else st.error)(msg)
+
+            ma_ok = "✅" if (get_ma_token() and get_ma_account()) else "❌"
+            st.markdown(f"<div style='font-size:11px;color:#4a5568;font-family:Space Mono,monospace;'>{ma_ok} MetaApi MT5 (Owner)</div>", unsafe_allow_html=True)
+
+            # Save MT5 settings per-user
+            if st.button("💾 Save MT5 Settings", key="save_mt5_btn", use_container_width=True):
+                uid = get_current_user_id()
+                _access_tok = st.session_state.get("auth_access_token", "")
+                ok = save_user_settings(uid, {
+                    "ma_token": st.session_state.get("ma_token", ""),
+                    "ma_account": st.session_state.get("ma_account", ""),
+                    "ma_sym_suffix": st.session_state.get("ma_sym_suffix", ""),
+                }, access_token=_access_tok)
+                if ok:
+                    st.success("MT5 settings saved!")
+                else:
+                    st.error("Failed to save. Check Supabase user_settings table.")
+
+        st.markdown("---")
+        st.markdown("<div style='font-size:11px;color:#8b9ab0;font-family:Space Mono,monospace;margin-bottom:4px;'>RISK SETTINGS</div>", unsafe_allow_html=True)
+        bal = st.number_input("Balance (USD)", value=st.session_state.get("balance",1000.0), min_value=100.0, key="bal_inp")
+        risk_pct = st.number_input("Risk %", value=st.session_state.get("risk_pct",1.0), min_value=0.1, max_value=10.0, step=0.1, key="rsk_inp")
+        st.session_state["balance"]  = bal
+        st.session_state["risk_pct"] = risk_pct
+        ccy_label = st.selectbox("Currency", ["USD","MYR","SGD","EUR","GBP","AUD","JPY"],
+                                  index=0, key="ccy_sel")
+        st.session_state["currency_label"] = ccy_label
+
+    return page
 
 # ============================================================
 # MAIN
 # ============================================================
-if "Live" in mode:
-    render_live()
-elif "Backtest" in mode:
-    render_backtest()
-else:
-    render_journal()
+def main():
+    page = render_sidebar()
+
+    # ── Auto-sync MT5 positions to DB on every page load ──────
+    if _sb_ok() and get_ma_token() and get_ma_account():
+        if not st.session_state.get("_mt5_synced_this_run"):
+            with st.spinner("🔄 Syncing MT5 positions…"):
+                db_trades = sync_mt5_to_db()
+            # Merge DB trades into session state for UI compatibility
+            st.session_state["active_trades"] = db_trades
+            st.session_state["_mt5_synced_this_run"] = True
+
+    if page == "🏠  Overview":
+        page_overview()
+    elif page == "🔮  Pre-Market":
+        page_weekend()
+    elif page == "📊  Trades & Journal":
+        page_trades()
+    elif page == "📈  Performance":
+        page_performance()
+    elif page == "🔬  Backtest":
+        page_backtest()
+    else:
+        # Extract symbol from page name like "💱  EURUSD"
+        sym = page.replace("💱  ","").strip()
+        if sym in SYMBOL_CONFIG:
+            page_symbol(sym)
+        else:
+            st.error(f"Unknown page: {page}")
+
+main()
