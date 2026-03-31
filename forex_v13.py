@@ -2536,35 +2536,8 @@ def page_overview():
         st.warning("⚠ Add your Twelve Data API key in the sidebar to load analysis.")
         return
 
-    # ── Auto Pre-Market Bias (runs once per hour, cached) ────
-    bias_data = _get_premarket_data()
-    if bias_data:
-        # Show compact bias bar at top
-        bias_chips = []
-        for sym in ACTIVE_SYMBOLS:
-            b = bias_data.get(sym, bias_data.get(sym.replace("USD",""), {}))
-            if not b:
-                continue
-            bias_val = b.get("bias","neutral")
-            conf_val = b.get("conf","LOW")
-            note_val = b.get("note","")
-            bc = "#10b981" if bias_val=="bull" else ("#ef4444" if bias_val=="bear" else "#f59e0b")
-            icon = "▲" if bias_val=="bull" else ("▼" if bias_val=="bear" else "◈")
-            conf_dot = "●" if conf_val=="HIGH" else ("◐" if conf_val=="MED" else "○")
-            bias_chips.append(
-                f"<div style='background:rgba({','.join(str(int(bc.lstrip('#')[i:i+2],16)) for i in (0,2,4))},0.1);"
-                f"border:1px solid {bc}33;border-radius:6px;padding:4px 8px;font-size:10px;"
-                f"font-family:Space Mono,monospace;white-space:nowrap;' title='{note_val}'>"
-                f"<b style='color:{bc};'>{icon} {sym[:6]}</b> "
-                f"<span style='color:#8b9ab0;'>{conf_dot}</span></div>")
-        if bias_chips:
-            st.markdown(
-                f"<div style='margin-bottom:12px;'>"
-                f"<div style='font-size:9px;color:#6366f1;font-family:Space Mono,monospace;"
-                f"letter-spacing:.1em;margin-bottom:6px;'>🔮 AI MARKET BIAS (auto-updated hourly)</div>"
-                f"<div style='display:flex;gap:5px;flex-wrap:wrap;'>"
-                + "".join(bias_chips) +
-                f"</div></div>", unsafe_allow_html=True)
+    # AI Market Bias removed — Grok Primary Analysis now covers fundamentals
+    # in its unified signal output (no more separate bias badges that can conflict)
 
     interval = st.session_state.get("ov_interval","15min")
     cols = st.columns(3)
@@ -2585,18 +2558,6 @@ def page_overview():
             tick = fetch_mt5_price(sym, get_ma_token_price(), get_ma_account_price())
             price = tick["bid"] if tick else a["close"]
             price_src = "MT5" if tick else "TD"
-
-            # AI bias badge for this symbol
-            sym_bias = bias_data.get(sym, bias_data.get(sym.replace("USD",""), {}))
-            bias_html = ""
-            if sym_bias:
-                bv = sym_bias.get("bias","neutral")
-                bn = sym_bias.get("note","")
-                b_col = "#10b981" if bv=="bull" else ("#ef4444" if bv=="bear" else "#f59e0b")
-                b_icon = "▲" if bv=="bull" else ("▼" if bv=="bear" else "◈")
-                bias_html = (f"<div style='font-size:10px;color:{b_col};margin-top:4px;"
-                             f"font-family:Space Mono,monospace;'>"
-                             f"🔮 {b_icon} {bv.upper()} — {bn}</div>")
 
             # Spike alert for this symbol
             sp_info = a.get("spike", {})
@@ -2686,7 +2647,7 @@ def page_overview():
                 f"<span class='muted'>SL <b style='color:#ef4444;'>{fmt_price(a['sl'],sym)}</b></span>"
                 f"<span class='muted'>TP1 <b style='color:#10b981;'>{fmt_price(a['tp1'],sym)}</b></span>"
                 f"<span class='muted'>R:R <b style='color:#a78bfa;'>{fmt_num(a['rr'],1)}:1</b></span></div>"
-                + news_html + risk_html + bias_html + spike_html +
+                + news_html + risk_html + spike_html +
                 f"</div>",
                 unsafe_allow_html=True)
             if a["warns"]:
