@@ -223,6 +223,7 @@ def render_auth_page():
         st.markdown("""
         <div style="text-align:center;margin-top:40px;margin-bottom:20px;">
             <div class="auth-logo">◈ Alpha<span>Edge</span> AI</div>
+            <div style="color:#00d4aa;font-size:15px;font-style:italic;font-weight:600;margin:8px 0 4px;">"Let AI Read the Market. You Make the Call."</div>
             <div class="auth-sub">AI-Powered Forex & Gold Trading Terminal</div>
         </div>
         """, unsafe_allow_html=True)
