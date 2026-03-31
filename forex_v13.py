@@ -2884,8 +2884,9 @@ def page_symbol(symbol):
         a["sl_d"] = _live_levels["sl_d"]
 
     # ── Top bar ──────────────────────────────────────────────
-    t1, t2, t3, t4 = st.columns([2,3,2,1])
+    t1, t1b, t2, t3, t4 = st.columns([1.5,1.5,3,1.5,1])
     with t1: render_direction_badge(a["direction"])
+    with t1b: render_grade_badge(a["grade"], a["score"])
     with t2:
         pc = "#10b981" if price >= a["close"] else "#ef4444"
         chg = price - a["close"]
