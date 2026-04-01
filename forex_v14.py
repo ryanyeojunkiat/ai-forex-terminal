@@ -1429,8 +1429,7 @@ def score_signal(df, df_h4, symbol, direction):
         mp = 5 if mh < 0 and mh < mh_p else (2 if mh < mh_p else 0)
     score += mp; bd["MACD"] = mp
 
-    # 8. Regime bonus/penalty
-    bd["Regime"] = regime
+    # 8. Regime bonus/penalty (store as info, not in score breakdown)
     if regime == "transitioning":
         score -= 5
         warns.append("⚠ Market transitioning (ADX 20-25) — be cautious")
