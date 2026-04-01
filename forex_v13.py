@@ -1567,6 +1567,7 @@ def calculate_smart_entry(df, direction, close, atr, symbol):
     # Determine entry type
     if best_dist < atr * 0.3:
         entry_type = "MARKET"  # price already at the level
+        best_price = close     # MARKET = enter at current price, not the level
     elif best_dist < atr * 1.0:
         entry_type = "LIMIT"   # set limit order at this level
     else:
@@ -3197,6 +3198,15 @@ def page_symbol(symbol):
     se_quality = se.get("quality", 2)
     se_stars = se.get("stars", "★★☆☆☆")
     se_reason = se.get("reason", "")
+    # Safety: if entry price drifted too far from live price, correct it
+    _live_price = float(a.get("close", se_price))
+    _entry_drift = abs(se_price - _live_price)
+    _atr_val = float(a.get("atr", 1))
+    if se_type == "MARKET" and _entry_drift > _atr_val * 0.5:
+        se_price = _live_price  # MARKET must always show current price
+    elif se_type == "LIMIT" and _entry_drift > _atr_val * 3:
+        se_type = "WAIT"  # LIMIT too far from current price → downgrade to WAIT
+        se_reason = f"Price moved too far from entry level"
     se_icon = "🟢" if se_type == "MARKET" else ("🟡" if se_type == "LIMIT" else "🔴")
     se_col = "#10b981" if se_type == "MARKET" else ("#f59e0b" if se_type == "LIMIT" else "#ef4444")
     st.markdown(
