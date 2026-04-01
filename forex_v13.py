@@ -1498,10 +1498,10 @@ def _gold_structure_check(df, direction):
 
 def determine_direction(df, df_h4, symbol=""):
     """
-    HYBRID DIRECTION ENGINE V2 — regime-aware, anti-chase.
-    Trending market → follow H4 trend, enter on pullback only.
-    Ranging market  → mean reversion at BB/RSI extremes.
-    NEVER chase momentum. NEVER trade against H4 in trends.
+    STABLE DIRECTION ENGINE V3.
+    DIRECTION = H4 trend. Period. Direction does NOT flip on small moves.
+    GRADE handles "is NOW a good time to enter" (pullback, extended, etc.)
+    Direction only changes when H4 trend changes.
     """
     if len(df) < 30:
         return "Wait"
@@ -1519,68 +1519,36 @@ def determine_direction(df, df_h4, symbol=""):
     h4t = _h4_trend(df_h4)
     regime = _detect_regime(df)
 
-    # ── ANTI-CHASE: if price already extended, don't give direction ──
-    extended, move_atr = _is_extended(df, "Buy", atr)
-    extended_sell, move_atr_sell = _is_extended(df, "Sell", atr)
-    ema_dist = _price_distance_from_ema(close, e20, atr)
+    # ════════════════════════════════════════════════════
+    # RULE 1: H4 TREND = DIRECTION (stable, doesn't flip easily)
+    # H4 bull/bull_weak → Buy. H4 bear/bear_weak → Sell.
+    # Whether to ENTER NOW is decided by the Grade, not direction.
+    # ════════════════════════════════════════════════════
+    if h4t in ("bull", "bull_weak"):
+        return "Buy"
+    if h4t in ("bear", "bear_weak"):
+        return "Sell"
 
     # ════════════════════════════════════════════════════
-    # MODE 1: TRENDING MARKET (ADX > 25)
-    # H4 trend is the ONLY authority for direction.
-    # Entry TF must show pullback, not chase.
+    # RULE 2: H4 NEUTRAL → use EMA structure as tiebreaker
     # ════════════════════════════════════════════════════
-    if regime == "trending":
-        # H4 must clearly point a direction
-        if h4t in ("bull", "bull_weak"):
-            # ANTI-CHASE: price must NOT be extended upward
-            if extended and ema_dist > 1.5:
-                return "Wait"  # Already ran up, too late
-            # Must be near or below EMA20 (pullback zone)
-            if ema_dist <= 0.8:
-                return "Buy"   # Pullback in uptrend = ideal
-            # If slightly above EMA20 but RSI not overbought, still ok
-            if ema_dist <= 1.5 and rsi < 65:
-                return "Buy"
-            return "Wait"  # Too far above EMA20, wait for pullback
-
-        elif h4t in ("bear", "bear_weak"):
-            if extended_sell and ema_dist < -1.5:
-                return "Wait"  # Already crashed, too late
-            if ema_dist >= -0.8:
-                return "Sell"  # Pullback in downtrend = ideal
-            if ema_dist >= -1.5 and rsi > 35:
-                return "Sell"
-            return "Wait"
-
-        else:  # H4 neutral in trending market = conflicting, skip
-            return "Wait"
+    if e20 > e50 and e50 > e200 and close > e200:
+        return "Buy"    # Strong bullish structure even if H4 neutral
+    if e20 < e50 and e50 < e200 and close < e200:
+        return "Sell"   # Strong bearish structure
 
     # ════════════════════════════════════════════════════
-    # MODE 2: RANGING MARKET (ADX < 20)
-    # Mean reversion at extremes. Buy low, sell high.
+    # RULE 3: RANGING MARKET OVERRIDE (ADX < 20)
+    # Only at BB extremes + RSI confirmation
     # ════════════════════════════════════════════════════
-    elif regime == "ranging":
-        if bb_lower > 0 and close <= bb_lower and rsi < 35:
-            return "Buy"   # At lower BB + oversold = bounce expected
-        if bb_upper > 0 and close >= bb_upper and rsi > 65:
-            return "Sell"  # At upper BB + overbought = drop expected
-        # Near support/resistance with RSI confirmation
-        if rsi < 30 and ema_dist < -1.0:
-            return "Buy"   # Deep oversold in range
-        if rsi > 70 and ema_dist > 1.0:
-            return "Sell"  # Deep overbought in range
-        return "Wait"  # In the middle of range, no edge
+    if regime == "ranging":
+        if bb_lower > 0 and close <= bb_lower and rsi < 30:
+            return "Buy"
+        if bb_upper > 0 and close >= bb_upper and rsi > 70:
+            return "Sell"
 
-    # ════════════════════════════════════════════════════
-    # MODE 3: TRANSITIONING (ADX 20-25)
-    # Be very conservative. Only trade with strong H4 + pullback.
-    # ════════════════════════════════════════════════════
-    else:
-        if h4t == "bull" and ema_dist <= 0.3 and rsi < 55:
-            return "Buy"   # Strong H4 bull + price AT ema + RSI not hot
-        if h4t == "bear" and ema_dist >= -0.3 and rsi > 45:
-            return "Sell"  # Strong H4 bear + price AT ema + RSI not cold
-        return "Wait"  # Not enough conviction
+    # No clear direction
+    return "Wait"
 
 
 def calculate_smart_entry(df, direction, close, atr, symbol):
