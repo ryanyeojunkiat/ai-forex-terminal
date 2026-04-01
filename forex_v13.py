@@ -1221,6 +1221,18 @@ def add_indicators(df):
     bb_std = x["close"].rolling(20).std()
     x["bb_upper"]  = x["bb_mid"] + 2*bb_std
     x["bb_lower"]  = x["bb_mid"] - 2*bb_std
+    # ── ADX (Average Directional Index) for market regime detection ──
+    plus_dm  = x["high"].diff()
+    minus_dm = -x["low"].diff()
+    plus_dm  = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+    _tr14    = tr.rolling(14).sum()
+    _plus_di  = 100 * plus_dm.rolling(14).sum() / _tr14.replace(0, np.nan)
+    _minus_di = 100 * minus_dm.rolling(14).sum() / _tr14.replace(0, np.nan)
+    _dx = 100 * (_plus_di - _minus_di).abs() / (_plus_di + _minus_di).replace(0, np.nan)
+    x["adx"]      = _dx.rolling(14).mean()
+    x["plus_di"]  = _plus_di
+    x["minus_di"] = _minus_di
     return x
 
 # ============================================================
@@ -1237,6 +1249,42 @@ def _h4_trend(df_h4):
     if close > e200: return "bull_weak"
     if close < e200: return "bear_weak"
     return "neutral"
+
+# ============================================================
+# MARKET REGIME DETECTION (NEW V2)
+# ============================================================
+def _detect_regime(df):
+    """
+    Detect market regime using ADX.
+    Returns: 'trending' | 'ranging' | 'transitioning'
+    """
+    if len(df) < 30:
+        return "transitioning"
+    adx = float(df.iloc[-1].get("adx", 20) or 20)
+    if adx > 25:
+        return "trending"
+    elif adx < 20:
+        return "ranging"
+    return "transitioning"
+
+def _is_extended(df, direction, atr):
+    """
+    Anti-chase guard: detect if price has already moved too far.
+    Returns (is_extended: bool, move_in_atr: float)
+    """
+    if len(df) < 6 or atr <= 0:
+        return False, 0.0
+    close = float(df.iloc[-1]["close"])
+    close_5_ago = float(df.iloc[-6]["close"])
+    move = close - close_5_ago if direction == "Buy" else close_5_ago - close
+    move_atr = move / atr
+    return move_atr > 2.0, round(move_atr, 1)
+
+def _price_distance_from_ema(close, ema20, atr):
+    """How far price is from EMA20 in ATR units. Positive = above, negative = below."""
+    if atr <= 0:
+        return 0.0
+    return round((close - ema20) / atr, 2)
 
 def _candle_score(df, direction):
     """Score candle pattern: 0-10. Engulfing, pin bars, momentum candles."""
@@ -1281,7 +1329,8 @@ def _candle_score(df, direction):
 
 def score_signal(df, df_h4, symbol, direction):
     """
-    H4-first scoring (0-100).
+    SIGNAL SCORING V2 — rewards pullbacks, punishes chasing.
+    Regime-aware: trending vs ranging have different scoring emphasis.
     Returns (score, breakdown_dict, grade, warning_list)
     """
     c = cfg(symbol)
@@ -1295,9 +1344,13 @@ def score_signal(df, df_h4, symbol, direction):
     rsi   = float(row.get("rsi14",  50)    or 50)
     mh    = float(row.get("macd_hist", 0)  or 0)
     mh_p  = float(prev.get("macd_hist",0)  or 0)
+    bb_upper = float(row.get("bb_upper", 0) or 0)
+    bb_lower = float(row.get("bb_lower", 0) or 0)
+    adx   = float(row.get("adx", 20) or 20)
     bd    = {}; score = 0; warns = []
+    regime = _detect_regime(df)
 
-    # 1. H4 Trend (25 pts) — HARD GATE
+    # 1. H4 Trend (25 pts) — HARD GATE, non-negotiable
     h4t = _h4_trend(df_h4)
     h4_aligned = (direction=="Buy"  and h4t in ("bull","bull_weak")) or \
                  (direction=="Sell" and h4t in ("bear","bear_weak"))
@@ -1308,96 +1361,106 @@ def score_signal(df, df_h4, symbol, direction):
     else:                   h4_pts = 0;  warns.append("🚫 H4 OPPOSES this trade — high-risk")
     score += h4_pts; bd["H4 Trend"] = h4_pts
 
-    # 2. EMA Stack (20 pts)
-    if direction == "Buy":
-        ep = (10 if e20>e50 else 0) + (10 if e50>e200 else 0)
-    else:
-        ep = (10 if e20<e50 else 0) + (10 if e50<e200 else 0)
-    score += ep; bd["EMA Stack"] = ep
-
-    # 3. Pullback to EMA (15 pts) — improved: check if price is pulling back TO ema, not away
-    margin = atr * 0.8
-    # Best: close near EMA20 AND coming from the right direction (pullback, not breakdown)
-    near_e20 = abs(close - e20) <= margin
-    near_e50 = abs(close - e50) <= margin * 1.5
-    # Check if previous bar was further from EMA (confirming pullback approach)
+    # 2. PULLBACK QUALITY (25 pts) — THE MOST IMPORTANT FACTOR
+    # Are we entering on a pullback or chasing momentum?
+    ema_dist = _price_distance_from_ema(close, e20, atr)
+    extended, move_atr = _is_extended(df, direction, atr)
     prev_close = float(prev["close"])
     approaching_e20 = abs(prev_close - e20) > abs(close - e20)
-    if near_e20 and approaching_e20:     pb = 15  # Perfect pullback to EMA20
-    elif near_e20:                        pb = 10  # Near EMA20 but not clearly pulling back
-    elif near_e50 and abs(prev_close - e50) > abs(close - e50): pb = 8
-    elif near_e50:                        pb = 5
-    else:                                 pb = 0
+
+    if direction == "Buy":
+        # Perfect: price pulled back to or below EMA20 and approaching from below
+        if ema_dist <= 0 and approaching_e20:     pb = 25  # Below EMA20, bouncing up
+        elif ema_dist <= 0.3 and approaching_e20: pb = 20  # Near EMA20, approaching
+        elif ema_dist <= 0.5:                     pb = 15  # Close to EMA20
+        elif ema_dist <= 1.0:                     pb = 8   # Slightly above
+        elif ema_dist <= 1.5:                     pb = 3   # Getting far
+        else:                                     pb = 0   # Chasing
+        if extended: pb = max(0, pb - 15); warns.append(f"🚫 CHASING — price moved {move_atr}× ATR in 5 bars")
+    else:
+        if ema_dist >= 0 and approaching_e20:     pb = 25
+        elif ema_dist >= -0.3 and approaching_e20: pb = 20
+        elif ema_dist >= -0.5:                    pb = 15
+        elif ema_dist >= -1.0:                    pb = 8
+        elif ema_dist >= -1.5:                    pb = 3
+        else:                                     pb = 0
+        if _is_extended(df, "Sell", atr)[0]: pb = max(0, pb - 15); warns.append(f"🚫 CHASING — price already extended")
     score += pb; bd["Pullback"] = pb
 
-    # 4. MACD momentum (15 pts) — enhanced with cross detection
-    macd_val = float(row.get("macd", 0) or 0)
-    macd_sig = float(row.get("macd_sig", 0) or 0)
-    macd_cross_bull = macd_val > macd_sig and float(prev.get("macd", 0) or 0) <= float(prev.get("macd_sig", 0) or 0)
-    macd_cross_bear = macd_val < macd_sig and float(prev.get("macd", 0) or 0) >= float(prev.get("macd_sig", 0) or 0)
+    # 3. EMA Stack alignment (15 pts)
     if direction == "Buy":
-        if macd_cross_bull: mp = 15  # Fresh bullish MACD cross = full points
-        elif mh > 0 and mh > mh_p: mp = 12
-        elif mh > mh_p: mp = 6
-        else: mp = 0
+        ep = (5 if e20>e50 else 0) + (5 if e50>e200 else 0) + (5 if close>e200 else 0)
     else:
-        if macd_cross_bear: mp = 15  # Fresh bearish MACD cross
-        elif mh < 0 and mh < mh_p: mp = 12
-        elif mh < mh_p: mp = 6
-        else: mp = 0
-    score += mp; bd["MACD"] = mp
+        ep = (5 if e20<e50 else 0) + (5 if e50<e200 else 0) + (5 if close<e200 else 0)
+    score += ep; bd["EMA Stack"] = ep
 
-    # 5. RSI zone (10 pts) — asset-class adjusted
-    ac = c.get("asset_class", "forex")
-    if ac in ("gold", "oil", "crypto"):
-        # Wider RSI zones for volatile assets
-        rsi_buy_range  = (25, 68)
-        rsi_sell_range = (32, 75)
-        rsi_ob = 78; rsi_os = 22
-    else:
-        rsi_buy_range  = (30, 60)
-        rsi_sell_range = (40, 70)
-        rsi_ob = 70; rsi_os = 30
+    # 4. RSI QUALITY (15 pts) — rewards ideal zones, PUNISHES extremes
     if direction == "Buy":
-        rp = 10 if rsi_buy_range[0]<=rsi<=rsi_buy_range[1] else (8 if rsi<rsi_buy_range[0] else 0)
-        if rsi > rsi_ob: warns.append(f"⚠ RSI {rsi:.0f} overbought — avoid Buy")
+        if rsi < 35:        rp = 15  # Oversold in uptrend = perfect pullback
+        elif rsi < 50:      rp = 12  # Below midline, good
+        elif rsi < 60:      rp = 8   # Neutral, acceptable
+        elif rsi < 70:      rp = 3   # Getting hot
+        else:               rp = -5; warns.append(f"⚠ RSI {rsi:.0f} overbought — DON'T BUY")
     else:
-        rp = 10 if rsi_sell_range[0]<=rsi<=rsi_sell_range[1] else (8 if rsi>rsi_sell_range[1] else 0)
-        if rsi < rsi_os: warns.append(f"⚠ RSI {rsi:.0f} oversold — avoid Sell")
+        if rsi > 65:        rp = 15  # Overbought in downtrend = perfect
+        elif rsi > 50:      rp = 12
+        elif rsi > 40:      rp = 8
+        elif rsi > 30:      rp = 3
+        else:               rp = -5; warns.append(f"⚠ RSI {rsi:.0f} oversold — DON'T SELL")
     score += rp; bd["RSI"] = rp
 
-    # 6. Candle (10 pts)
+    # 5. Candle pattern confirmation (10 pts)
     cp = _candle_score(df, direction)
     score += cp; bd["Candle"] = cp
 
-    # 7. Session (5 pts) — crypto always active
+    # 6. Session quality (5 pts)
     if c.get("asset_class") == "crypto":
-        sp = 5; sess_ok_ = True; sess_name_ = get_session_now()
+        sp = 5
     else:
         sess_ok_, sess_name_ = session_ok(symbol)
         sp = 5 if sess_ok_ else 0
-        if not sess_ok_: warns.append(f"⚠ Off-peak session ({sess_name_}) — reduced signal quality")
+        if not sess_ok_: warns.append(f"⚠ Off-peak session — reduced quality")
     score += sp; bd["Session"] = sp
 
-    # 8. Volatility quality check — penalize choppy or chaotic markets
+    # 7. MACD momentum (5 pts) — reduced weight, just confirmation
+    if direction == "Buy":
+        mp = 5 if mh > 0 and mh > mh_p else (2 if mh > mh_p else 0)
+    else:
+        mp = 5 if mh < 0 and mh < mh_p else (2 if mh < mh_p else 0)
+    score += mp; bd["MACD"] = mp
+
+    # 8. Regime bonus/penalty
+    bd["Regime"] = regime
+    if regime == "transitioning":
+        score -= 5
+        warns.append("⚠ Market transitioning (ADX 20-25) — be cautious")
+
+    # 9. Volatility quality
     if len(df) >= 20:
         atr_arr = df["atr14"].dropna().tail(20)
         if len(atr_arr) >= 10:
             atr_mean = float(atr_arr.mean())
             atr_std = float(atr_arr.std())
-            # If ATR is very unstable (high std relative to mean), market is chaotic
             if atr_mean > 0 and atr_std / atr_mean > 0.4:
                 score -= 5
-                warns.append("⚠ Volatile/choppy market — ATR unstable")
+                warns.append("⚠ Choppy market — ATR unstable")
 
     score = min(100, max(0, score))
 
-    # Grade — symbol-specific thresholds, H4 alignment required for A/A+
-    if   score >= c["grade_aplus"] and h4_pts >= 20: grade = "A+"
-    elif score >= c["grade_a"]     and h4_pts >= 10: grade = "A"
-    elif score >= c["grade_b"]:                       grade = "B"
+    # Grade — H4 alignment strictly required for A/A+
+    if   score >= c["grade_aplus"] and h4_pts >= 25: grade = "A+"
+    elif score >= c["grade_a"]     and h4_pts >= 25: grade = "A"
+    elif score >= c["grade_b"]     and h4_pts >= 10: grade = "B"
     elif score >= 45:                                 grade = "C"
     else:                                             grade = "D"
+
+    # HARD CAP: chasing = never above B
+    if extended:
+        if grade in ("A+", "A"): grade = "B"
+
+    # HARD CAP: H4 opposed = never above C
+    if h4_opposed:
+        if grade in ("A+", "A", "B"): grade = "C"
 
     return score, bd, grade, warns
 
@@ -1433,87 +1496,99 @@ def _gold_structure_check(df, direction):
         ll = lows[-1] < lows[-2]
         return lh and ll
 
-def _gold_direction(df, df_h4):
-    """
-    Gold direction: H4 TREND is king, H1/Entry TF only confirms.
-    H4 tells you WHERE to go, lower TF tells you WHEN to enter.
-    Never trade against H4 — that's how you lose $2000.
-    """
-    if len(df) < 25:
-        return "Wait"
-    row = df.iloc[-1]
-    close = float(row["close"])
-    e9  = float(row.get("ema9",  close))
-    e21 = float(row.get("ema21", close))
-    e50 = float(row.get("ema50", close))
-    e200 = float(row.get("ema200", close))
-    rsi = float(row.get("rsi14", 50) or 50)
-    mh  = float(row.get("macd_hist", 0) or 0)
-
-    # ── H4 TREND = PRIMARY DIRECTION (3 points) ──
-    h4t = _h4_trend(df_h4)
-    bull = 0; bear = 0
-
-    if h4t == "bull":       bull += 3
-    elif h4t == "bull_weak": bull += 2
-    elif h4t == "bear":      bear += 3
-    elif h4t == "bear_weak": bear += 2
-
-    # ── H1-LEVEL STRUCTURE: EMA50/200 alignment (2 points) ──
-    if e50 > e200 and close > e200: bull += 2
-    elif e50 < e200 and close < e200: bear += 2
-    elif e50 > e200: bull += 1
-    elif e50 < e200: bear += 1
-
-    # ── ENTRY TF CONFIRMATION: only minor weight (1 point each) ──
-    # EMA9/21 cross — timing signal, not direction signal
-    if e9 > e21: bull += 1
-    elif e9 < e21: bear += 1
-
-    # MACD histogram — momentum confirmation
-    if mh > 0: bull += 1
-    elif mh < 0: bear += 1
-
-    # ── SAFETY FILTERS ──
-    # RSI extreme = don't enter (market already exhausted)
-    if rsi > 75:
-        bull = max(0, bull - 2)  # Overbought: reduce buy conviction
-    elif rsi < 25:
-        bear = max(0, bear - 2)  # Oversold: reduce sell conviction
-
-    # ── DIRECTION DECISION ──
-    # H4 strong trend (3 pts) + any 2 confirmations = 5 → trade
-    # H4 weak (2 pts) + 3 confirmations = 5 → trade
-    # Without H4 support, max possible = 4 → never reaches threshold
-    if bull >= 5: return "Buy"
-    if bear >= 5: return "Sell"
-    return "Wait"
-
 def determine_direction(df, df_h4, symbol=""):
-    """Determine trade direction. Gold uses fast EMA system, others use H4+EMA stack."""
-    # Gold-specific direction detection
-    if norm(symbol) == "XAUUSD":
-        return _gold_direction(df, df_h4)
+    """
+    HYBRID DIRECTION ENGINE V2 — regime-aware, anti-chase.
+    Trending market → follow H4 trend, enter on pullback only.
+    Ranging market  → mean reversion at BB/RSI extremes.
+    NEVER chase momentum. NEVER trade against H4 in trends.
+    """
+    if len(df) < 30:
+        return "Wait"
+
+    row   = df.iloc[-1]
+    close = float(row["close"])
+    e20   = float(row.get("ema20",  close))
+    e50   = float(row.get("ema50",  close))
+    e200  = float(row.get("ema200", close))
+    rsi   = float(row.get("rsi14", 50) or 50)
+    atr   = float(row.get("atr14", 0.001) or 0.001)
+    bb_upper = float(row.get("bb_upper", 0) or 0)
+    bb_lower = float(row.get("bb_lower", 0) or 0)
 
     h4t = _h4_trend(df_h4)
-    row  = df.iloc[-1]
-    e20  = float(row.get("ema20",  row["close"]))
-    e50  = float(row.get("ema50",  row["close"]))
-    e200 = float(row.get("ema200", row["close"]))
-    close = float(row["close"])
-    bull_score = (1 if h4t in ("bull","bull_weak") else 0) + \
-                 (1 if e20>e50 else 0) + (1 if e50>e200 else 0) + (1 if close>e200 else 0)
-    bear_score = (1 if h4t in ("bear","bear_weak") else 0) + \
-                 (1 if e20<e50 else 0) + (1 if e50<e200 else 0) + (1 if close<e200 else 0)
-    if bull_score >= 3: return "Buy"
-    if bear_score >= 3: return "Sell"
-    return "Wait"
+    regime = _detect_regime(df)
+
+    # ── ANTI-CHASE: if price already extended, don't give direction ──
+    extended, move_atr = _is_extended(df, "Buy", atr)
+    extended_sell, move_atr_sell = _is_extended(df, "Sell", atr)
+    ema_dist = _price_distance_from_ema(close, e20, atr)
+
+    # ════════════════════════════════════════════════════
+    # MODE 1: TRENDING MARKET (ADX > 25)
+    # H4 trend is the ONLY authority for direction.
+    # Entry TF must show pullback, not chase.
+    # ════════════════════════════════════════════════════
+    if regime == "trending":
+        # H4 must clearly point a direction
+        if h4t in ("bull", "bull_weak"):
+            # ANTI-CHASE: price must NOT be extended upward
+            if extended and ema_dist > 1.5:
+                return "Wait"  # Already ran up, too late
+            # Must be near or below EMA20 (pullback zone)
+            if ema_dist <= 0.8:
+                return "Buy"   # Pullback in uptrend = ideal
+            # If slightly above EMA20 but RSI not overbought, still ok
+            if ema_dist <= 1.5 and rsi < 65:
+                return "Buy"
+            return "Wait"  # Too far above EMA20, wait for pullback
+
+        elif h4t in ("bear", "bear_weak"):
+            if extended_sell and ema_dist < -1.5:
+                return "Wait"  # Already crashed, too late
+            if ema_dist >= -0.8:
+                return "Sell"  # Pullback in downtrend = ideal
+            if ema_dist >= -1.5 and rsi > 35:
+                return "Sell"
+            return "Wait"
+
+        else:  # H4 neutral in trending market = conflicting, skip
+            return "Wait"
+
+    # ════════════════════════════════════════════════════
+    # MODE 2: RANGING MARKET (ADX < 20)
+    # Mean reversion at extremes. Buy low, sell high.
+    # ════════════════════════════════════════════════════
+    elif regime == "ranging":
+        if bb_lower > 0 and close <= bb_lower and rsi < 35:
+            return "Buy"   # At lower BB + oversold = bounce expected
+        if bb_upper > 0 and close >= bb_upper and rsi > 65:
+            return "Sell"  # At upper BB + overbought = drop expected
+        # Near support/resistance with RSI confirmation
+        if rsi < 30 and ema_dist < -1.0:
+            return "Buy"   # Deep oversold in range
+        if rsi > 70 and ema_dist > 1.0:
+            return "Sell"  # Deep overbought in range
+        return "Wait"  # In the middle of range, no edge
+
+    # ════════════════════════════════════════════════════
+    # MODE 3: TRANSITIONING (ADX 20-25)
+    # Be very conservative. Only trade with strong H4 + pullback.
+    # ════════════════════════════════════════════════════
+    else:
+        if h4t == "bull" and ema_dist <= 0.3 and rsi < 55:
+            return "Buy"   # Strong H4 bull + price AT ema + RSI not hot
+        if h4t == "bear" and ema_dist >= -0.3 and rsi > 45:
+            return "Sell"  # Strong H4 bear + price AT ema + RSI not cold
+        return "Wait"  # Not enough conviction
 
 
 def calculate_smart_entry(df, direction, close, atr, symbol):
     """
-    Smart Entry Engine — finds optimal entry using EMA, support/resistance, BB.
-    Returns dict: entry_price, entry_type (MARKET/LIMIT/WAIT), quality (1-5), reason.
+    SMART ENTRY V2 — always based on current price, anti-chase aware.
+    MARKET = at key level now, enter immediately.
+    LIMIT = set pending order at nearby pullback level.
+    WAIT = no good level, skip this trade.
     """
     c = cfg(symbol)
     dec = c.get("dec", 5)
@@ -1523,8 +1598,23 @@ def calculate_smart_entry(df, direction, close, atr, symbol):
     bb_upper = float(row.get("bb_upper", 0) or 0)
     bb_lower = float(row.get("bb_lower", 0) or 0)
     rsi = float(row.get("rsi14", 50) or 50)
+    regime = _detect_regime(df)
 
-    # Find swing support/resistance from last 60 bars
+    # ── Anti-chase check first ──
+    extended, move_atr = _is_extended(df, direction, atr)
+    ema_dist = abs(close - ema20) / atr if atr > 0 else 0
+
+    # If price is extended, force WAIT regardless
+    if extended and ema_dist > 1.5:
+        return {
+            "entry_price": round(ema20, dec),
+            "entry_type": "WAIT",
+            "quality": 1,
+            "stars": "★☆☆☆☆",
+            "reason": f"Price extended {move_atr}× ATR — wait for pullback to EMA20",
+        }
+
+    # ── Find key levels ──
     support = close - atr * 3
     resistance = close + atr * 3
     if len(df) >= 15:
@@ -1538,68 +1628,66 @@ def calculate_smart_entry(df, direction, close, atr, symbol):
             if h >= w["high"].max() and h > close:
                 if h < resistance: resistance = h
 
-    # Build candidate entry levels
-    candidates = []
+    # ── Am I at a key level RIGHT NOW? ──
+    at_ema20 = abs(close - ema20) < atr * 0.5
+    at_support = direction == "Buy" and abs(close - support) < atr * 0.5
+    at_resistance = direction == "Sell" and abs(close - resistance) < atr * 0.5
+    at_bb = (direction == "Buy" and bb_lower > 0 and abs(close - bb_lower) < atr * 0.5) or \
+            (direction == "Sell" and bb_upper > 0 and abs(close - bb_upper) < atr * 0.5)
 
-    if direction == "Buy":
-        # Best: pullback to EMA20 or support or BB lower
-        if ema20 < close and close - ema20 < atr * 1.5:
-            candidates.append(("EMA20 pullback", ema20, abs(close - ema20)))
-        if support < close and close - support < atr * 2:
-            candidates.append(("Support level", support, abs(close - support)))
-        if bb_lower > 0 and bb_lower < close and close - bb_lower < atr * 2:
-            candidates.append(("BB Lower band", bb_lower, abs(close - bb_lower)))
-        # Current price if near EMA20
-        if abs(close - ema20) < atr * 0.5:
-            candidates.append(("At EMA20", close, 0))
-    else:
-        # Sell: pullback to EMA20 or resistance or BB upper
-        if ema20 > close and ema20 - close < atr * 1.5:
-            candidates.append(("EMA20 pullback", ema20, abs(ema20 - close)))
-        if resistance > close and resistance - close < atr * 2:
-            candidates.append(("Resistance level", resistance, abs(resistance - close)))
-        if bb_upper > 0 and bb_upper > close and bb_upper - close < atr * 2:
-            candidates.append(("BB Upper band", bb_upper, abs(bb_upper - close)))
-        if abs(close - ema20) < atr * 0.5:
-            candidates.append(("At EMA20", close, 0))
-
-    # Pick best candidate (closest to current price that's still a good level)
-    if not candidates:
-        # No good level found — use current price
+    if at_ema20 or at_support or at_resistance or at_bb:
+        reason = "At EMA20" if at_ema20 else ("At support" if at_support else ("At resistance" if at_resistance else "At BB band"))
+        quality = 3
+        if at_ema20: quality += 1
+        if (direction == "Buy" and rsi < 45) or (direction == "Sell" and rsi > 55): quality += 1
+        quality = min(5, quality)
         return {
-            "entry_price": round(close, dec),
+            "entry_price": round(close, dec),  # ALWAYS current price for MARKET
             "entry_type": "MARKET",
-            "quality": 2,
-            "stars": "★★☆☆☆",
-            "reason": "No key level nearby — market entry at current price",
+            "quality": quality,
+            "stars": "★" * quality + "☆" * (5 - quality),
+            "reason": f"{reason} @ {round(close, dec)}",
         }
 
-    candidates.sort(key=lambda x: x[2])  # sort by distance
-    best_name, best_price, best_dist = candidates[0]
-
-    # Determine entry type
-    if best_dist < atr * 0.3:
-        entry_type = "MARKET"  # price already at the level
-        best_price = close     # MARKET = enter at current price, not the level
-    elif best_dist < atr * 1.0:
-        entry_type = "LIMIT"   # set limit order at this level
+    # ── Not at key level — find nearest LIMIT level ──
+    candidates = []
+    if direction == "Buy":
+        if ema20 < close and close - ema20 < atr * 1.5:
+            candidates.append(("EMA20 pullback", ema20, close - ema20))
+        if support < close and close - support < atr * 2:
+            candidates.append(("Support level", support, close - support))
+        if bb_lower > 0 and bb_lower < close and close - bb_lower < atr * 2:
+            candidates.append(("BB Lower band", bb_lower, close - bb_lower))
     else:
-        entry_type = "WAIT"    # too far, wait for pullback
+        if ema20 > close and ema20 - close < atr * 1.5:
+            candidates.append(("EMA20 pullback", ema20, ema20 - close))
+        if resistance > close and resistance - close < atr * 2:
+            candidates.append(("Resistance level", resistance, resistance - close))
+        if bb_upper > 0 and bb_upper > close and bb_upper - close < atr * 2:
+            candidates.append(("BB Upper band", bb_upper, bb_upper - close))
 
-    # Quality scoring (1-5)
-    quality = 2
-    if best_dist < atr * 0.3: quality += 1  # at key level
-    if (direction == "Buy" and rsi < 45) or (direction == "Sell" and rsi > 55): quality += 1  # RSI favorable
-    if abs(close - ema20) < atr * 0.5: quality += 1  # near EMA20
-    quality = min(5, max(1, quality))
-    stars = "★" * quality + "☆" * (5 - quality)
+    if candidates:
+        candidates.sort(key=lambda x: x[2])
+        best_name, best_price, best_dist = candidates[0]
+        quality = 2
+        if best_dist < atr * 0.5: quality += 1
+        if (direction == "Buy" and rsi < 45) or (direction == "Sell" and rsi > 55): quality += 1
+        quality = min(5, max(1, quality))
+        return {
+            "entry_price": round(best_price, dec),
+            "entry_type": "LIMIT",
+            "quality": quality,
+            "stars": "★" * quality + "☆" * (5 - quality),
+            "reason": f"{best_name} @ {round(best_price, dec)}",
+        }
 
+    # ── No good level at all → WAIT ──
     return {
-        "entry_price": round(best_price, dec),
-        "entry_type": entry_type,
-        "quality": quality,
-        "stars": stars,
-        "reason": f"{best_name} @ {round(best_price, dec)}",
+        "entry_price": round(close, dec),
+        "entry_type": "WAIT",
+        "quality": 1,
+        "stars": "★☆☆☆☆",
+        "reason": "No key level nearby — wait for better setup",
     }
 
 
@@ -2262,36 +2350,38 @@ def gold_engine_score(df, df_h4, df_h1, direction, base_score, base_grade):
     adjusted_score = min(100, max(0, base_score + bonus))
     gold_info["adjusted_score"] = adjusted_score
 
-    # Re-grade with adjusted score + hard safety gates
-    if   adjusted_score >= c["grade_aplus"]: adjusted_grade = "A+"
-    elif adjusted_score >= c["grade_a"]:    adjusted_grade = "A"
-    elif adjusted_score >= c["grade_b"]:    adjusted_grade = "B"
-    elif adjusted_score >= 45:              adjusted_grade = "C"
-    else:                                   adjusted_grade = "D"
+    # Re-grade with adjusted score + STRICT safety gates
+    # A/A+ requires H4 alignment (h4_pts=25 from base score)
+    if   adjusted_score >= c["grade_aplus"] and h4_ok: adjusted_grade = "A+"
+    elif adjusted_score >= c["grade_a"]     and h4_ok: adjusted_grade = "A"
+    elif adjusted_score >= c["grade_b"]:               adjusted_grade = "B"
+    elif adjusted_score >= 45:                          adjusted_grade = "C"
+    else:                                               adjusted_grade = "D"
 
-    # ── HARD CAPS: prevent inflated grades when key signals conflict ──
+    # ── HARD CAPS: prevent inflated grades ──
 
-    # CAP 1: H4 opposes direction → max grade B (never A/A+)
+    # CAP 1: H4 opposes → max C (not even B)
     if not h4_ok:
-        if adjusted_grade in ("A+", "A"):
-            adjusted_grade = "B"
-            extra_warns.append("🚫 H4 OPPOSES this trade — high-risk")
-
-    # CAP 2: H4 opposes AND market structure opposes → max grade C
-    if not h4_ok and not structure_ok:
         if adjusted_grade in ("A+", "A", "B"):
             adjusted_grade = "C"
-            extra_warns.append("🛑 H4 + Market structure both oppose — observe only")
+            extra_warns.append("🚫 H4 OPPOSES — observe only")
 
-    # CAP 3: 3+ contradictions → max grade B regardless
+    # CAP 2: 3+ contradictions → max B
     if contradictions >= 3:
         if adjusted_grade in ("A+", "A"):
             adjusted_grade = "B"
 
-    # CAP 4: MTF alignment "opposed" (0/3 TFs) → max grade C
+    # CAP 3: MTF alignment "opposed" → max C
     if gold_info.get("mtf_alignment") == "opposed":
         if adjusted_grade in ("A+", "A", "B"):
             adjusted_grade = "C"
+
+    # CAP 4: Anti-chase — if price extended, max B
+    _ext, _ext_atr = _is_extended(df, direction, atr)
+    if _ext:
+        if adjusted_grade in ("A+", "A"):
+            adjusted_grade = "B"
+            extra_warns.append(f"🚫 Price extended {_ext_atr}× ATR — don't chase")
 
     return adjusted_score, gold_info, adjusted_grade, extra_warns
 
