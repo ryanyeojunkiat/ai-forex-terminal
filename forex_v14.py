@@ -2561,8 +2561,9 @@ def render_score_breakdown(bd, score, grade):
             f"<div class='mono-title'>SIGNAL SCORE</div>"
             f"<div style='font-family:Space Mono,monospace;font-size:28px;font-weight:700;"
             f"color:{gc};margin-bottom:10px;'>{score} <span style='font-size:14px;'>{grade}</span></div>")
-    maxes = {"H4 Trend":25,"EMA Stack":20,"Pullback":15,"MACD":15,"RSI":10,"Candle":10,"Session":5}
+    maxes = {"H4 Trend":25,"Pullback":25,"EMA Stack":15,"RSI":15,"Candle":10,"Session":5,"MACD":5}
     for k, v in bd.items():
+        if not isinstance(v, (int, float)): continue  # skip non-numeric entries
         mx  = maxes.get(k, 10)
         pct = int(v/mx*100) if mx else 0
         bar_col = "#00d4aa" if pct>=80 else "#f59e0b" if pct>=40 else "#ef4444"
