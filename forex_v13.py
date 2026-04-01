@@ -4112,29 +4112,31 @@ def render_sidebar():
         st.session_state["ov_interval"] = INTERVAL_OPTIONS[ov_int_label]
 
         st.markdown("---")
-        st.markdown("<div style='font-size:11px;color:#8b9ab0;font-family:Space Mono,monospace;margin-bottom:4px;'>API KEYS</div>", unsafe_allow_html=True)
+        # API Keys — OWNER ONLY (other users use platform keys from env)
+        if _is_owner():
+            st.markdown("<div style='font-size:11px;color:#8b9ab0;font-family:Space Mono,monospace;margin-bottom:4px;'>API KEYS</div>", unsafe_allow_html=True)
 
-        # Twelve Data
-        _td = st.text_input("Twelve Data", value=st.session_state.get("td_key",_ENV_TD),
-                            type="password", key="td_inp", placeholder="paste key…")
-        if _td: st.session_state["td_key"] = _td
+            # Twelve Data
+            _td = st.text_input("Twelve Data", value=st.session_state.get("td_key",_ENV_TD),
+                                type="password", key="td_inp", placeholder="paste key…")
+            if _td: st.session_state["td_key"] = _td
 
-        # xAI Grok
-        _xai = st.text_input("xAI Grok", value=st.session_state.get("xai_key",_ENV_XAI),
-                             type="password", key="xai_inp", placeholder="paste key…")
-        if _xai: st.session_state["xai_key"] = _xai
+            # xAI Grok
+            _xai = st.text_input("xAI Grok", value=st.session_state.get("xai_key",_ENV_XAI),
+                                 type="password", key="xai_inp", placeholder="paste key…")
+            if _xai: st.session_state["xai_key"] = _xai
 
-        _gm = st.selectbox("Grok Model", _GROK_MODELS, index=0, key="grok_model_sel")
+            _gm = st.selectbox("Grok Model", _GROK_MODELS, index=0, key="grok_model_sel")
 
-        # Trading Economics
-        _te = st.text_input("Trading Economics", value=st.session_state.get("te_key",_ENV_TE),
-                            type="password", key="te_inp", placeholder="paste TE key…")
-        if _te: st.session_state["te_key"] = _te
+            # Trading Economics
+            _te = st.text_input("Trading Economics", value=st.session_state.get("te_key",_ENV_TE),
+                                type="password", key="te_inp", placeholder="paste TE key…")
+            if _te: st.session_state["te_key"] = _te
 
-        td_ok  = "✅" if get_td_key()  else "❌"
-        xai_ok = "✅" if get_xai_key() else "❌"
-        te_ok  = "✅" if get_te_key()  else "❌"
-        st.markdown(f"<div style='font-size:11px;color:#4a5568;font-family:Space Mono,monospace;'>{td_ok} TD &nbsp; {xai_ok} xAI ({_gm[:14]}) &nbsp; {te_ok} TE</div>", unsafe_allow_html=True)
+            td_ok  = "✅" if get_td_key()  else "❌"
+            xai_ok = "✅" if get_xai_key() else "❌"
+            te_ok  = "✅" if get_te_key()  else "❌"
+            st.markdown(f"<div style='font-size:11px;color:#4a5568;font-family:Space Mono,monospace;'>{td_ok} TD &nbsp; {xai_ok} xAI ({_gm[:14]}) &nbsp; {te_ok} TE</div>", unsafe_allow_html=True)
 
         st.markdown("---")
         st.markdown("<div style='font-size:11px;color:#00d4aa;font-family:Space Mono,monospace;margin-bottom:4px;'>MT5 LIVE (MetaApi)</div>", unsafe_allow_html=True)
