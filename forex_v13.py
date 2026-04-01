@@ -1496,6 +1496,99 @@ def determine_direction(df, df_h4, symbol=""):
     if bear_score >= 3: return "Sell"
     return "Wait"
 
+
+def calculate_smart_entry(df, direction, close, atr, symbol):
+    """
+    Smart Entry Engine — finds optimal entry using EMA, support/resistance, BB.
+    Returns dict: entry_price, entry_type (MARKET/LIMIT/WAIT), quality (1-5), reason.
+    """
+    c = cfg(symbol)
+    dec = c.get("dec", 5)
+    row = df.iloc[-1]
+    ema20  = float(row.get("ema20", close))
+    ema50  = float(row.get("ema50", close))
+    bb_upper = float(row.get("bb_upper", 0) or 0)
+    bb_lower = float(row.get("bb_lower", 0) or 0)
+    rsi = float(row.get("rsi14", 50) or 50)
+
+    # Find swing support/resistance from last 60 bars
+    support = close - atr * 3
+    resistance = close + atr * 3
+    if len(df) >= 15:
+        lookback = df.tail(60)
+        for i in range(2, len(lookback) - 2):
+            r = lookback.iloc[i]
+            h, l = float(r["high"]), float(r["low"])
+            w = lookback.iloc[i-2:i+3]
+            if l <= w["low"].min() and l < close:
+                if l > support: support = l
+            if h >= w["high"].max() and h > close:
+                if h < resistance: resistance = h
+
+    # Build candidate entry levels
+    candidates = []
+
+    if direction == "Buy":
+        # Best: pullback to EMA20 or support or BB lower
+        if ema20 < close and close - ema20 < atr * 1.5:
+            candidates.append(("EMA20 pullback", ema20, abs(close - ema20)))
+        if support < close and close - support < atr * 2:
+            candidates.append(("Support level", support, abs(close - support)))
+        if bb_lower > 0 and bb_lower < close and close - bb_lower < atr * 2:
+            candidates.append(("BB Lower band", bb_lower, abs(close - bb_lower)))
+        # Current price if near EMA20
+        if abs(close - ema20) < atr * 0.5:
+            candidates.append(("At EMA20", close, 0))
+    else:
+        # Sell: pullback to EMA20 or resistance or BB upper
+        if ema20 > close and ema20 - close < atr * 1.5:
+            candidates.append(("EMA20 pullback", ema20, abs(ema20 - close)))
+        if resistance > close and resistance - close < atr * 2:
+            candidates.append(("Resistance level", resistance, abs(resistance - close)))
+        if bb_upper > 0 and bb_upper > close and bb_upper - close < atr * 2:
+            candidates.append(("BB Upper band", bb_upper, abs(bb_upper - close)))
+        if abs(close - ema20) < atr * 0.5:
+            candidates.append(("At EMA20", close, 0))
+
+    # Pick best candidate (closest to current price that's still a good level)
+    if not candidates:
+        # No good level found — use current price
+        return {
+            "entry_price": round(close, dec),
+            "entry_type": "MARKET",
+            "quality": 2,
+            "stars": "★★☆☆☆",
+            "reason": "No key level nearby — market entry at current price",
+        }
+
+    candidates.sort(key=lambda x: x[2])  # sort by distance
+    best_name, best_price, best_dist = candidates[0]
+
+    # Determine entry type
+    if best_dist < atr * 0.3:
+        entry_type = "MARKET"  # price already at the level
+    elif best_dist < atr * 1.0:
+        entry_type = "LIMIT"   # set limit order at this level
+    else:
+        entry_type = "WAIT"    # too far, wait for pullback
+
+    # Quality scoring (1-5)
+    quality = 2
+    if best_dist < atr * 0.3: quality += 1  # at key level
+    if (direction == "Buy" and rsi < 45) or (direction == "Sell" and rsi > 55): quality += 1  # RSI favorable
+    if abs(close - ema20) < atr * 0.5: quality += 1  # near EMA20
+    quality = min(5, max(1, quality))
+    stars = "★" * quality + "☆" * (5 - quality)
+
+    return {
+        "entry_price": round(best_price, dec),
+        "entry_type": entry_type,
+        "quality": quality,
+        "stars": stars,
+        "reason": f"{best_name} @ {round(best_price, dec)}",
+    }
+
+
 def compute_levels(entry, direction, atr, symbol, df=None):
     """
     Smart SL/TP: uses swing highs/lows when available, ATR fallback.
@@ -2224,6 +2317,9 @@ def analyze_symbol(symbol, interval, bars, td_key):
     bb_upper = float(row.get("bb_upper",0) or 0)
     bb_lower = float(row.get("bb_lower",0) or 0)
 
+    # ── Smart Entry ────────────────────────────────────────────
+    smart_entry = calculate_smart_entry(df, direction, close, atr, symbol)
+
     # ── GROK PRIMARY ANALYSIS ─────────────────────────────────
     grok_result = None
     xai_key = get_xai_key()
@@ -2258,6 +2354,7 @@ def analyze_symbol(symbol, interval, bars, td_key):
         "h4_trend": _h4_trend(df_h4),
         "spike": spike_info,
         "gold": gold_info,
+        "smart_entry": smart_entry,
         "grok": grok_result,  # Grok-primary AI analysis
         "error": None,
     }
@@ -3069,14 +3166,30 @@ def page_symbol(symbol):
         f"{kpi('ATR', fmt_num(a['atr'],cfg_['dec']), '#8b9ab0')}"
         f"{kpi('SESSION', a['session'][:10], sess_col)}"
         f"</div>", unsafe_allow_html=True)
-    # Row 2: Trade levels
+    # Row 2: Smart Entry + Trade levels
+    se = a.get("smart_entry", {})
+    se_price = se.get("entry_price", a["close"])
+    se_type = se.get("entry_type", "MARKET")
+    se_quality = se.get("quality", 2)
+    se_stars = se.get("stars", "★★☆☆☆")
+    se_reason = se.get("reason", "")
+    se_icon = "🟢" if se_type == "MARKET" else ("🟡" if se_type == "LIMIT" else "🔴")
+    se_col = "#10b981" if se_type == "MARKET" else ("#f59e0b" if se_type == "LIMIT" else "#ef4444")
     st.markdown(
         f"<div style='display:flex;gap:6px;margin:0 0 4px;'>"
-        f"{kpi('ENTRY', fmt_price(a['close'],symbol), '#e8edf2')}"
+        f"{kpi(f'{se_icon} ENTRY ({se_type})', fmt_price(se_price,symbol), se_col)}"
         f"{kpi('SL', fmt_price(a['sl'],symbol), '#ef4444')}"
         f"{kpi('TP1', fmt_price(a['tp1'],symbol), '#10b981')}"
         f"{kpi('TP2', fmt_price(a['tp2'],symbol), '#84cc16')}"
         f"{kpi('R:R', fmt_num(a['rr'],1)+':1', '#a78bfa')}"
+        f"</div>", unsafe_allow_html=True)
+    # Entry quality bar
+    _eq_col = "#10b981" if se_quality >= 4 else ("#f59e0b" if se_quality >= 3 else "#ef4444")
+    st.markdown(
+        f"<div style='background:#0d1117;border:1px solid rgba(255,255,255,0.08);border-radius:6px;"
+        f"padding:6px 12px;margin:0 0 6px;display:flex;justify-content:space-between;align-items:center;'>"
+        f"<span style='font-size:10px;color:#8b9ab0;font-family:Space Mono,monospace;'>{se_reason}</span>"
+        f"<span style='font-size:12px;color:{_eq_col};'>{se_stars}</span>"
         f"</div>", unsafe_allow_html=True)
 
     # Row 3: Risk/Reward in actual currency
