@@ -1435,8 +1435,9 @@ def _gold_structure_check(df, direction):
 
 def _gold_direction(df, df_h4):
     """
-    Gold-specific direction using faster EMA9/EMA21 + price structure.
-    More responsive than standard EMA20/50/200 for gold scalping.
+    Gold direction: H4 TREND is king, H1/Entry TF only confirms.
+    H4 tells you WHERE to go, lower TF tells you WHEN to enter.
+    Never trade against H4 — that's how you lose $2000.
     """
     if len(df) < 25:
         return "Wait"
@@ -1445,33 +1446,45 @@ def _gold_direction(df, df_h4):
     e9  = float(row.get("ema9",  close))
     e21 = float(row.get("ema21", close))
     e50 = float(row.get("ema50", close))
+    e200 = float(row.get("ema200", close))
     rsi = float(row.get("rsi14", 50) or 50)
     mh  = float(row.get("macd_hist", 0) or 0)
 
-    # H4 trend still matters for gold but with less weight
+    # ── H4 TREND = PRIMARY DIRECTION (3 points) ──
     h4t = _h4_trend(df_h4)
-
     bull = 0; bear = 0
-    # Fast EMA cross (most important for gold scalping)
-    if e9 > e21: bull += 2
-    elif e9 < e21: bear += 2
-    # Price above/below EMA21
-    if close > e21: bull += 1
-    elif close < e21: bear += 1
-    # EMA21 vs EMA50 (medium trend)
-    if e21 > e50: bull += 1
-    elif e21 < e50: bear += 1
-    # MACD histogram direction
+
+    if h4t == "bull":       bull += 3
+    elif h4t == "bull_weak": bull += 2
+    elif h4t == "bear":      bear += 3
+    elif h4t == "bear_weak": bear += 2
+
+    # ── H1-LEVEL STRUCTURE: EMA50/200 alignment (2 points) ──
+    if e50 > e200 and close > e200: bull += 2
+    elif e50 < e200 and close < e200: bear += 2
+    elif e50 > e200: bull += 1
+    elif e50 < e200: bear += 1
+
+    # ── ENTRY TF CONFIRMATION: only minor weight (1 point each) ──
+    # EMA9/21 cross — timing signal, not direction signal
+    if e9 > e21: bull += 1
+    elif e9 < e21: bear += 1
+
+    # MACD histogram — momentum confirmation
     if mh > 0: bull += 1
     elif mh < 0: bear += 1
-    # H4 alignment (1 point, not dominant)
-    if h4t in ("bull", "bull_weak"): bull += 1
-    elif h4t in ("bear", "bear_weak"): bear += 1
-    # RSI midline
-    if rsi > 55: bull += 1
-    elif rsi < 45: bear += 1
 
-    # Need strong conviction for gold (5/7 signals)
+    # ── SAFETY FILTERS ──
+    # RSI extreme = don't enter (market already exhausted)
+    if rsi > 75:
+        bull = max(0, bull - 2)  # Overbought: reduce buy conviction
+    elif rsi < 25:
+        bear = max(0, bear - 2)  # Oversold: reduce sell conviction
+
+    # ── DIRECTION DECISION ──
+    # H4 strong trend (3 pts) + any 2 confirmations = 5 → trade
+    # H4 weak (2 pts) + 3 confirmations = 5 → trade
+    # Without H4 support, max possible = 4 → never reaches threshold
     if bull >= 5: return "Buy"
     if bear >= 5: return "Sell"
     return "Wait"
