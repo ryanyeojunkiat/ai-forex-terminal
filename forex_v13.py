@@ -3198,15 +3198,18 @@ def page_symbol(symbol):
     se_quality = se.get("quality", 2)
     se_stars = se.get("stars", "★★☆☆☆")
     se_reason = se.get("reason", "")
-    # Safety: if entry price drifted too far from live price, correct it
-    _live_price = float(a.get("close", se_price))
+    # Safety: compare entry price against LIVE MT5 price (not cached close)
+    _live_price = float(price)  # MT5 live price from line 2994-2995
     _entry_drift = abs(se_price - _live_price)
     _atr_val = float(a.get("atr", 1))
-    if se_type == "MARKET" and _entry_drift > _atr_val * 0.5:
-        se_price = _live_price  # MARKET must always show current price
+    if se_type == "MARKET":
+        se_price = _live_price  # MARKET always = current live price
     elif se_type == "LIMIT" and _entry_drift > _atr_val * 3:
-        se_type = "WAIT"  # LIMIT too far from current price → downgrade to WAIT
+        se_type = "WAIT"  # LIMIT too far from live price → downgrade to WAIT
         se_reason = f"Price moved too far from entry level"
+    elif se_type == "WAIT" and _entry_drift < _atr_val * 0.3:
+        se_type = "MARKET"  # Price reached the WAIT level → upgrade to MARKET
+        se_price = _live_price
     se_icon = "🟢" if se_type == "MARKET" else ("🟡" if se_type == "LIMIT" else "🔴")
     se_col = "#10b981" if se_type == "MARKET" else ("#f59e0b" if se_type == "LIMIT" else "#ef4444")
     st.markdown(
