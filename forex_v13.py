@@ -2248,12 +2248,36 @@ def gold_engine_score(df, df_h4, df_h1, direction, base_score, base_grade):
     adjusted_score = min(100, max(0, base_score + bonus))
     gold_info["adjusted_score"] = adjusted_score
 
-    # Re-grade with adjusted score
+    # Re-grade with adjusted score + hard safety gates
     if   adjusted_score >= c["grade_aplus"]: adjusted_grade = "A+"
     elif adjusted_score >= c["grade_a"]:    adjusted_grade = "A"
     elif adjusted_score >= c["grade_b"]:    adjusted_grade = "B"
     elif adjusted_score >= 45:              adjusted_grade = "C"
     else:                                   adjusted_grade = "D"
+
+    # ── HARD CAPS: prevent inflated grades when key signals conflict ──
+
+    # CAP 1: H4 opposes direction → max grade B (never A/A+)
+    if not h4_ok:
+        if adjusted_grade in ("A+", "A"):
+            adjusted_grade = "B"
+            extra_warns.append("🚫 H4 OPPOSES this trade — high-risk")
+
+    # CAP 2: H4 opposes AND market structure opposes → max grade C
+    if not h4_ok and not structure_ok:
+        if adjusted_grade in ("A+", "A", "B"):
+            adjusted_grade = "C"
+            extra_warns.append("🛑 H4 + Market structure both oppose — observe only")
+
+    # CAP 3: 3+ contradictions → max grade B regardless
+    if contradictions >= 3:
+        if adjusted_grade in ("A+", "A"):
+            adjusted_grade = "B"
+
+    # CAP 4: MTF alignment "opposed" (0/3 TFs) → max grade C
+    if gold_info.get("mtf_alignment") == "opposed":
+        if adjusted_grade in ("A+", "A", "B"):
+            adjusted_grade = "C"
 
     return adjusted_score, gold_info, adjusted_grade, extra_warns
 
