@@ -3243,11 +3243,20 @@ def page_symbol(symbol):
         def _tf_icon(t): return "▲" if "bull" in str(t) else ("▼" if "bear" in str(t) else "◈")
         mtf_col = {"perfect": "#10b981", "good": "#84cc16", "weak": "#f59e0b", "opposed": "#ef4444"}.get(mtf_align, "#8b9ab0")
 
-        # Zone display
+        # Zone display (V4: zone_pos is now a dict with freshness info)
         zone_info = gi.get("zones", {})
         zone_pos = zone_info.get("position", None)
-        zone_text = {"supply": "🔴 In Supply Zone", "demand": "🟢 In Demand Zone"}.get(zone_pos, "— No zone")
-        zone_col = "#ef4444" if zone_pos == "supply" else ("#10b981" if zone_pos == "demand" else "#8b9ab0")
+        if isinstance(zone_pos, dict):
+            _zt = zone_pos.get("type", "")
+            _zf = "FRESH" if zone_pos.get("fresh") else f"visited {zone_pos.get('visits',0)}x"
+            zone_text = f"{'🔴' if _zt=='supply' else '🟢'} In {_zt.upper()} Zone ({_zf})"
+            zone_col = "#ef4444" if _zt == "supply" else "#10b981"
+        elif isinstance(zone_pos, str):
+            zone_text = {"supply": "🔴 In Supply Zone", "demand": "🟢 In Demand Zone"}.get(zone_pos, "— No zone")
+            zone_col = "#ef4444" if zone_pos == "supply" else ("#10b981" if zone_pos == "demand" else "#8b9ab0")
+        else:
+            zone_text = "— No zone"
+            zone_col = "#8b9ab0"
 
         # FVG, CHoCH, Killzone, RSI Div
         fvg = gi.get("fvg", {})
