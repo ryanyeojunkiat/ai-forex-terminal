@@ -1,7 +1,7 @@
 """
-AI FOREX TERMINAL  v14.0  (Multi-User SaaS Edition)
-Multi-page redesign: Overview · Symbol pages · Trades · Backtest
-Core fixes: H4-first signal engine, ATR-based SL/TP, symbol-specific thresholds
+ALPHA EDGE AI TERMINAL  v15.0  (Hybrid Engine V3)
+Stable direction (H4-first), anti-chase, regime-aware scoring
+ADX regime detection, pullback-quality scoring, no grade inflation
 Auth: Supabase Auth for multi-user, per-user MT5 & trade data
 """
 import os, json, re, uuid
@@ -166,7 +166,7 @@ def fire_tp_alert(symbol, tp_label, tp_price, tp2_price=None):
 def get_historical_context(symbol: str, direction: str, min_trades: int = 5) -> str:
     """
     Query Supabase for this trader's past performance on similar trades.
-    Returns a context string injected into Grok prompts for personalised advice.
+    Returns a context string for personalised signal analysis.
     Requires at least min_trades records to avoid misleading small-sample bias.
     """
     if not _sb_ok(): return ""
@@ -204,34 +204,10 @@ def get_historical_context(symbol: str, direction: str, min_trades: int = 5) -> 
 
 def verify_signal_with_ai(symbol, grade, direction, score, analysis) -> bool:
     """
-    Ask Grok to verify if a new Grade A/A+ signal is worth entering.
-    Injects trader's personal history for personalised judgement.
-    Returns True if valid, False if AI rejects. Falls back to True if no key.
+    Always returns True — AI verification removed per user request.
+    This is now a pure calculator-based system.
     """
-    key = get_xai_key()
-    if not key: return True
-    rsi  = fmt_num(analysis.get("rsi", 50), 1)
-    h4   = analysis.get("h4_trend", "?")
-    atr  = fmt_num(analysis.get("atr", 0), 5)
-    sess = analysis.get("session", "?")
-    hist = get_historical_context(symbol, direction, min_trades=5)
-    msg = (
-        f"NEW SIGNAL VERIFICATION — Should I enter this trade?\n"
-        f"Symbol: {symbol}  Grade: {grade}  Direction: {direction}  Score: {score}/100\n"
-        f"RSI14: {rsi}  H4 Trend: {h4}  ATR: {atr}  Session: {sess}"
-        f"{hist}\n\n"
-        f"Reply on the FIRST line with exactly: VALID or INVALID\n"
-        f"Then 1 sentence explaining why.\n"
-        f"Be strict: INVALID if RSI is extreme, H4 conflicts, session is low liquidity, "
-        f"or the trader's personal history shows poor results in these conditions."
-    )
-    resp = _grok([
-        {"role": "system", "content":
-         "You are a concise forex signal validator who uses the trader's personal performance data. UTC: "
-         + pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M")},
-        {"role": "user", "content": msg}
-    ], max_tokens=100, temperature=0.1, api_key=key) or ""
-    return "INVALID" not in resp.upper()[:40]
+    return True
 # Read from env OR Streamlit Cloud secrets (for deployment)
 def _get_secret(key, default=""):
     try:
@@ -242,7 +218,6 @@ def _get_secret(key, default=""):
     return os.getenv(key, default).strip()
 
 _ENV_TD  = _get_secret("TWELVE_DATA_API_KEY")
-_ENV_XAI = _get_secret("XAI_API_KEY")
 _ENV_TE  = _get_secret("TRADING_ECONOMICS_KEY")
 _ENV_MA_TOKEN   = _get_secret("METAAPI_TOKEN")
 _ENV_MA_ACCOUNT = _get_secret("METAAPI_ACCOUNT")
@@ -260,7 +235,6 @@ def _is_owner():
 
 # Auto-populate session state from secrets on startup (shared API keys for all users)
 if _ENV_TD  and not st.session_state.get("td_key"):      st.session_state["td_key"]      = _ENV_TD
-if _ENV_XAI and not st.session_state.get("xai_key"):     st.session_state["xai_key"]     = _ENV_XAI
 if _ENV_TE  and not st.session_state.get("te_key"):      st.session_state["te_key"]      = _ENV_TE
 
 # Per-user MT5 credentials: load from Supabase user_settings on first login
@@ -546,9 +520,6 @@ INTERVAL_OPTIONS = {"5 Min":"5min","15 Min":"15min","30 Min":"30min","1 Hour":"1
 SESSIONS_UTC = {"London":(7,16),"NewYork":(12,21),"Overlap":(12,16),"Asian":(22,7)}
 
 _MA_PROVISION_URL = "https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai"
-_GROK_MODELS = ["grok-4-1-fast-non-reasoning","grok-4-1-fast-reasoning",
-                "grok-4.20-0309-non-reasoning","grok-4.20-0309-reasoning"]
-
 # MetaApi interval → timeframe string
 MA_TIMEFRAME_MAP = {"5min":"5m","15min":"15m","30min":"30m","1h":"1h","4h":"4h","1d":"1d"}
 # Interval → minutes (for startTime calculation)
@@ -561,9 +532,7 @@ def norm(s): return str(s).upper().replace("/","").strip()
 def cfg(sym): return SYMBOL_CONFIG.get(norm(sym), SYMBOL_CONFIG["EURUSD"])
 def to_api_sym(s): return API_SYMBOL_MAP.get(norm(s), norm(s))
 def get_td_key():  return st.session_state.get("td_key","") or _ENV_TD
-def get_xai_key(): return st.session_state.get("xai_key","") or _ENV_XAI
 def get_te_key():  return st.session_state.get("te_key","")  or _ENV_TE
-def get_grok_model(): return st.session_state.get("grok_model", _GROK_MODELS[0])
 # Shared MT5 for PRICE DATA — all users see live prices via owner's MT5
 def get_ma_token_price():   return _ENV_MA_TOKEN or ""
 def get_ma_account_price(): return _ENV_MA_ACCOUNT or ""
@@ -751,265 +720,8 @@ def fetch_bars_ma(symbol, interval, bars, token, account_id):
     return df.sort_values("time").dropna(subset=["time","open","high","low","close"]).reset_index(drop=True)
 
 # ============================================================
-# GROK
+# SIGNAL ENGINE — Calculator-based scoring (AI removed)
 # ============================================================
-def _grok(messages, max_tokens=400, temperature=0.25, api_key="", model=""):
-    key = api_key or get_xai_key()
-    if not key: return None
-    mdl = model or get_grok_model()
-    try:
-        r = requests.post("https://api.x.ai/v1/chat/completions",
-                          headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},
-                          json={"model":mdl,"messages":messages,"max_tokens":max_tokens,
-                                "temperature":float(max(0.0,min(1.0,temperature)))},
-                          timeout=25)
-        if r.status_code != 200:
-            try: msg = r.json().get("error",{}).get("message") or r.text[:120]
-            except: msg = r.text[:120]
-            return f"[Grok {r.status_code}: {msg}]"
-        return r.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        return f"[Grok error: {e}]"
-
-@st.cache_data(ttl=90)
-def get_news_sentiment(symbol, xai_key):
-    if not xai_key:
-        return {"risk":"LOW","adj":0,"bias":"neutral","summary":"No xAI key","events":[],"ok":False}
-    sym_name = SYMBOL_CONFIG.get(norm(symbol),{}).get("name", symbol)
-    # Build precise session context so Grok doesn't hallucinate market hours
-    now_utc   = pd.Timestamp.utcnow()
-    utc_str   = now_utc.strftime("%Y-%m-%d %H:%M UTC")
-    utc_h     = now_utc.hour + now_utc.minute / 60
-    active_sessions = []
-    if 7  <= utc_h < 16: active_sessions.append("London")
-    if 12 <= utc_h < 21: active_sessions.append("New York")
-    if 12 <= utc_h < 16: active_sessions.append("London-NY Overlap")
-    if utc_h >= 22 or utc_h < 7: active_sessions.append("Asian")
-    if not active_sessions: active_sessions.append("Off-peak (21:00-22:00 UTC)")
-    sess_str  = ", ".join(active_sessions)
-    ny_close_h = 21
-    if utc_h < ny_close_h:
-        ny_left = round(ny_close_h - utc_h, 1)
-        ny_str  = f"New York closes in {ny_left:.1f}h (at 21:00 UTC)"
-    else:
-        ny_str  = "New York session is CLOSED"
-    raw = _grok([
-        {"role":"system","content":(
-            f"You are a forex analyst with REAL-TIME market awareness.\n"
-            f"EXACT TIME NOW: {utc_str}\n"
-            f"ACTIVE SESSIONS: {sess_str}\n"
-            f"{ny_str}\n"
-            f"RULE: Do NOT guess or approximate market hours. Use ONLY the exact times above. "
-            f"If you mention session timing, it must match these numbers exactly."
-        )},
-        {"role":"user","content":
-         f"Analyze CURRENT news sentiment for {sym_name}.\n"
-         f"Current time: {utc_str}. Active: {sess_str}.\n"
-         f'Return ONLY JSON: {{"risk":"HIGH|MEDIUM|LOW","adj":<-15 to 15>,"bias":"bull|bear|neutral",'
-         f'"summary":"<20 words max>","events":["ev1","ev2","ev3"]}}\n'
-         f"HIGH=major event within 2h (NFP/FOMC/CPI/CB). Negative adj for imminent HIGH-risk events.\n"
-         f"DO NOT mention session timing unless directly relevant to a news event."}
-    ], max_tokens=200, temperature=0.1, api_key=xai_key)
-    if not raw or raw.startswith("[Grok"):
-        return {"risk":"LOW","adj":0,"bias":"neutral","summary":raw or "Error","events":[],"ok":False}
-    try:
-        obj = json.loads(re.sub(r"```json|```","",raw).strip())
-        return {"risk":obj.get("risk","LOW"),"adj":int(obj.get("adj",0)),
-                "bias":obj.get("bias","neutral"),"summary":obj.get("summary",""),
-                "events":obj.get("events",[]),"ok":True}
-    except:
-        return {"risk":"LOW","adj":0,"bias":"neutral","summary":raw[:100],"events":[],"ok":False}
-
-def get_ai_analysis(symbol, direction, score, grade, entry, sl, tp1, tp2,
-                    atr, rsi, macd_hist, session, news, df_tail):
-    key = get_xai_key()
-    if not key: return "⚠ No xAI key."
-    recent = df_tail[["open","high","low","close"]].round(cfg(symbol)["dec"]).to_string(index=False)
-    n_info = f"Risk={news['risk']}, bias={news['bias']}, {news['summary']}" if news and news.get("ok") else "no data"
-    msg = (f"Symbol: {symbol}  Dir: {direction}  Grade: {grade} ({score}/100)\n"
-           f"Entry: {fmt_price(entry,symbol)}  SL: {fmt_price(sl,symbol)}  TP1: {fmt_price(tp1,symbol)}  TP2: {fmt_price(tp2,symbol)}\n"
-           f"ATR: {fmt_num(atr,5)}  RSI: {fmt_num(rsi,1)}  MACD_hist: {fmt_num(macd_hist,5)}\n"
-           f"Session: {session}  News: {n_info}\nLast 10 bars:\n{recent}\n"
-           f"→ Is this a valid {direction} setup? Key risks? 3-4 sentences max.")
-    return _grok([{"role":"system","content":"You are a professional forex risk manager. Be direct."},
-                  {"role":"user","content":msg}], max_tokens=300, temperature=0.3, api_key=key) or "No response."
-
-# ============================================================
-# GROK-PRIMARY SIGNAL ENGINE — AI decides, Calculator backs up
-# ============================================================
-@st.cache_data(ttl=120)
-def grok_primary_analysis(symbol, close, atr, rsi, macd_val, macd_hist,
-                          ema20, ema50, ema200, h4_trend, session_name,
-                          calc_direction, calc_score, calc_grade,
-                          sl_calc, tp1_calc, tp2_calc,
-                          last_10_bars_str, xai_key, bb_upper=0, bb_lower=0):
-    """
-    GROK-PRIMARY: Grok receives ALL technical data + calculator score,
-    then makes the FINAL trading decision with its own AI Rating.
-    Returns dict with: ai_rating, direction, action, entry, sl, tp1, tp2,
-    reasoning, confidence, key_factors
-    """
-    if not xai_key:
-        return {"ai_rating": 0, "direction": calc_direction, "action": "WAIT",
-                "reasoning": "No xAI key — using calculator only.", "confidence": "LOW",
-                "key_factors": [], "error": True}
-
-    c = cfg(symbol)
-    sym_name = c.get("name", symbol)
-    asset_class = c.get("asset_class", "forex")
-    pip_size = c.get("pip", 0.0001)
-    dec = c.get("dec", 5)
-
-    # Build time context
-    now_utc = pd.Timestamp.utcnow()
-    utc_str = now_utc.strftime("%Y-%m-%d %H:%M UTC")
-    day_of_week = now_utc.strftime("%A")
-
-    prompt = f"""You are an elite institutional forex & commodities trader with 20 years of experience.
-You have access to REAL technical data below. Combine this with your knowledge of:
-- Current global macro environment, central bank policies, geopolitical events
-- Typical price behavior patterns for {sym_name} ({asset_class})
-- Session liquidity ({session_name}), day-of-week effects ({day_of_week})
-- News impact, risk-on/risk-off sentiment, intermarket correlations
-
-═══ TECHNICAL DATA FOR {symbol} ═══
-Time: {utc_str} ({day_of_week})
-Session: {session_name}
-Asset: {sym_name} ({asset_class})
-
-PRICE: {close:.{dec}f}
-ATR(14): {atr:.{dec}f}
-RSI(14): {rsi:.1f}
-MACD: {macd_val:.{dec}f} | Histogram: {macd_hist:.{dec}f}
-EMA20: {ema20:.{dec}f} | EMA50: {ema50:.{dec}f} | EMA200: {ema200:.{dec}f}
-Bollinger Upper: {bb_upper:.{dec}f} | Lower: {bb_lower:.{dec}f}
-H4 Trend: {h4_trend}
-
-CALCULATOR BACKUP (rule-based):
-Direction: {calc_direction} | Score: {calc_score}/100 | Grade: {calc_grade}
-SL: {sl_calc:.{dec}f} | TP1: {tp1_calc:.{dec}f} | TP2: {tp2_calc:.{dec}f}
-
-LAST 10 CANDLES:
-{last_10_bars_str}
-
-═══ YOUR TASK ═══
-Analyze ALL the above + your macro/news knowledge. Return ONLY valid JSON:
-{{
-  "ai_rating": <1-10 scale: 1=terrible, 5=neutral, 8=strong, 10=perfect setup>,
-  "direction": "BUY" or "SELL" or "WAIT",
-  "action": "STRONG BUY" or "BUY" or "WAIT" or "SELL" or "STRONG SELL",
-  "entry": <optimal entry price based on SMART ENTRY ENGINE levels>,
-  "entry_type": "MARKET" or "LIMIT" or "WAIT",
-  "sl": <stop loss price>,
-  "tp1": <take profit 1>,
-  "tp2": <take profit 2>,
-  "confidence": "HIGH" or "MEDIUM" or "LOW",
-  "reasoning": "<2-3 sentence analysis combining technicals + fundamentals>",
-  "key_factors": ["factor1", "factor2", "factor3"],
-  "news_impact": "<1 sentence on current news/macro affecting this pair>",
-  "agrees_with_calculator": true or false,
-  "risk_warning": "<1 sentence if any major risk>"
-}}
-
-RULES:
-- ai_rating 8+ = strong trade, 6-7 = decent, 5 = neutral, below 5 = avoid
-- If session is off-peak, reduce rating by 1-2 points
-- If major news event within 2h, add risk_warning
-- Be HONEST — if no clear setup, say WAIT. Don't force trades.
-- ENTRY MUST be at a technical level (EMA20, support/resistance, BB band), NOT just current price ± small offset
-- entry_type: MARKET = enter now (price at ideal level), LIMIT = set pending order at key level, WAIT = no good entry yet
-- If price is far from any key level, set entry_type to WAIT or LIMIT at the nearest key level
-- SL/TP must be realistic based on ATR. SL behind the key level, TP at next key level
-"""
-
-    raw = _grok([
-        {"role": "system", "content": (
-            "You are an elite institutional trader. Return ONLY valid JSON. "
-            "No markdown, no code blocks, no explanation outside JSON. "
-            "Be brutally honest — bad setups get low ratings."
-        )},
-        {"role": "user", "content": prompt}
-    ], max_tokens=400, temperature=0.2, api_key=xai_key)
-
-    if not raw or raw.startswith("[Grok"):
-        return {"ai_rating": 0, "direction": calc_direction, "action": "WAIT",
-                "reasoning": raw or "Grok error", "confidence": "LOW",
-                "key_factors": [], "error": True}
-
-    try:
-        cleaned = re.sub(r"```json|```", "", raw).strip()
-        result = json.loads(cleaned)
-        # Normalize direction
-        d = result.get("direction", "WAIT").upper()
-        result["direction"] = "Buy" if d in ("BUY","LONG") else ("Sell" if d in ("SELL","SHORT") else "Wait")
-        # Ensure numeric fields
-        result["ai_rating"] = max(1, min(10, int(result.get("ai_rating", 5))))
-        for k in ("entry", "sl", "tp1", "tp2"):
-            if k in result:
-                result[k] = float(result[k])
-            else:
-                result[k] = {"entry": close, "sl": sl_calc, "tp1": tp1_calc, "tp2": tp2_calc}[k]
-        # entry_type from Grok
-        if "entry_type" not in result or result.get("entry_type") not in ("MARKET","LIMIT","WAIT"):
-            result["entry_type"] = "MARKET"
-        result["error"] = False
-        # Add calculator comparison
-        result["calc_score"] = calc_score
-        result["calc_grade"] = calc_grade
-        result["calc_direction"] = calc_direction
-        return result
-    except Exception as e:
-        return {"ai_rating": 5, "direction": calc_direction, "action": "WAIT",
-                "reasoning": f"Parse error: {raw[:200]}", "confidence": "LOW",
-                "key_factors": [], "error": True,
-                "calc_score": calc_score, "calc_grade": calc_grade, "calc_direction": calc_direction}
-
-def get_ai_trade_advice(trade: dict, live_price: float, analysis: dict, news: dict) -> str:
-    """
-    Active trade advisor: asks Grok whether to HOLD, EXIT, or MOVE SL.
-    Returns a clear recommendation with reasoning.
-    """
-    key = get_xai_key()
-    if not key: return "⚠ No xAI key — add it in the sidebar."
-    sym    = trade.get("symbol","?")
-    dir_   = trade["direction"]
-    entry  = float(trade["entry"]); sl = float(trade["sl"])
-    tp1    = float(trade.get("tp1", entry)); tp2 = float(trade.get("tp2", entry))
-    risk   = abs(entry - sl)
-    move   = (live_price - entry) if dir_=="Buy" else (entry - live_price)
-    pnl_r  = round(move/risk, 2) if risk > 0 else 0
-    # Distance to SL and TP in pips
-    ps     = cfg(sym).get("pip", 0.0001)
-    sl_dist_pips  = round(abs(live_price - sl) / ps, 1)
-    tp1_dist_pips = round(abs(live_price - tp1) / ps, 1)
-    # Context from analysis
-    rsi       = fmt_num(analysis.get("rsi", 50), 1)
-    macd_hist = fmt_num(analysis.get("macd_hist", 0), 5)
-    h4_trend  = analysis.get("h4_trend","?")
-    session   = analysis.get("session","?")
-    n_info    = f"Risk={news['risk']}, bias={news['bias'].upper()}, {news['summary']}" if news and news.get("ok") else "no news data"
-    hist = get_historical_context(sym, dir_, min_trades=5)
-    msg = (
-        f"ACTIVE TRADE — HOLD / EXIT / MOVE SL?\n"
-        f"Symbol: {sym}  Direction: {dir_}\n"
-        f"Entry: {fmt_price(entry,sym)}  |  Current Price: {fmt_price(live_price,sym)}\n"
-        f"SL: {fmt_price(sl,sym)} ({sl_dist_pips} pips away)  |  TP1: {fmt_price(tp1,sym)} ({tp1_dist_pips} pips away)\n"
-        f"Current P&L: {pnl_r:+.2f}R\n"
-        f"RSI14: {rsi}  |  MACD Hist: {macd_hist}  |  H4 Trend: {h4_trend}\n"
-        f"Session: {session}  |  News: {n_info}"
-        f"{hist}\n\n"
-        f"Give a CLEAR recommendation:\n"
-        f"1. Action: HOLD / EXIT NOW / MOVE SL TO BREAKEVEN / PARTIAL EXIT\n"
-        f"2. Reason: 2-3 sentences why\n"
-        f"3. Risk: What is the main danger right now?\n"
-        f"Be direct and specific. Factor in the trader's personal history above if available."
-    )
-    return _grok([
-        {"role":"system","content":"You are a professional forex risk manager who uses the trader's personal performance history to give personalised advice. UTC: "
-         + pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M")},
-        {"role":"user","content":msg}
-    ], max_tokens=400, temperature=0.2, api_key=key) or "No response from Grok."
-
 # ============================================================
 # TRADING ECONOMICS — Real Economic Calendar
 # ============================================================
@@ -1079,8 +791,8 @@ def fetch_te_calendar(te_key: str):
 
 def get_te_news_for_symbol(symbol: str, te_key: str) -> dict:
     """
-    Returns news dict compatible with get_news_sentiment() output,
-    but powered by real Trading Economics calendar data.
+    Returns news dict from Trading Economics economic calendar.
+    Powers all news/calendar feeds in the app.
     """
     events = fetch_te_calendar(te_key)
     sym = norm(symbol)
@@ -1208,10 +920,14 @@ def add_indicators(df):
     tr = pd.concat([x["high"]-x["low"],
                     (x["high"]-x["close"].shift()).abs(),
                     (x["low"] -x["close"].shift()).abs()],axis=1).max(axis=1)
-    x["atr14"] = tr.rolling(14).mean()
+    x["atr14"] = tr.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
     delta = x["close"].diff()
     gain = delta.clip(lower=0); loss = -delta.clip(upper=0)
-    x["rsi14"] = 100-(100/(1+gain.rolling(14).mean()/loss.rolling(14).mean().replace(0,np.nan)))
+    # V15 FIX: Wilder's exponential smoothing — matches MT4/MT5/TradingView RSI
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    x["rsi14"] = 100 - (100 / (1 + rs))
     ema12 = x["close"].ewm(span=12,adjust=False).mean()
     ema26 = x["close"].ewm(span=26,adjust=False).mean()
     x["macd"]      = ema12 - ema26
@@ -1429,8 +1145,7 @@ def score_signal(df, df_h4, symbol, direction):
         mp = 5 if mh < 0 and mh < mh_p else (2 if mh < mh_p else 0)
     score += mp; bd["MACD"] = mp
 
-    # 8. Regime bonus/penalty
-    bd["Regime"] = regime
+    # 8. Regime bonus/penalty (store as info, not in score breakdown)
     if regime == "transitioning":
         score -= 5
         warns.append("⚠ Market transitioning (ADX 20-25) — be cautious")
@@ -1829,7 +1544,7 @@ def spike_adjusted_levels(entry, direction, atr, symbol, spike_info, df=None):
 # ============================================================
 # GOLD ENGINE — Professional XAUUSD Trading System
 # ============================================================
-def _gold_asian_range(df):
+def _gold_asian_range(df, bar_time=None):
     """
     Calculate Asian session range (00:00-08:00 UTC).
     Returns dict: {high, low, range, valid}
@@ -1911,8 +1626,9 @@ def _gold_liquidity_sweep(df, atr, lookback=30):
 
 def _gold_supply_demand_zones(df, lookback=80):
     """
-    Identify Supply & Demand zones based on strong impulse moves.
+    Identify Supply & Demand zones based on strong impulse moves with zone freshness tracking.
     Supply zone = origin of strong bearish move. Demand zone = origin of strong bullish move.
+    Tracks how many times price revisited each zone and adjusts strength accordingly.
     """
     zones = {"supply": [], "demand": []}
     if len(df) < lookback:
@@ -1920,35 +1636,88 @@ def _gold_supply_demand_zones(df, lookback=80):
     data = df.tail(lookback)
     atr = float(data.iloc[-1].get("atr14", 1.0) or 1.0)
     threshold = atr * 1.5
+
+    # First pass: identify zones
+    zone_list = []
     for i in range(1, len(data) - 1):
         curr = data.iloc[i]
         body = abs(float(curr["close"]) - float(curr["open"]))
         if body > threshold:
+            zone_type = None
             if float(curr["close"]) < float(curr["open"]):
-                zones["supply"].append({
+                zone_dict = {
+                    "type": "supply",
                     "high": float(curr["high"]),
                     "low": float(curr["open"]),
-                    "strength": body / atr
-                })
+                    "strength": body / atr,
+                    "bar_idx": i
+                }
+                zone_list.append(zone_dict)
             else:
-                zones["demand"].append({
+                zone_dict = {
+                    "type": "demand",
                     "high": float(curr["open"]),
                     "low": float(curr["low"]),
-                    "strength": body / atr
-                })
-    zones["supply"] = sorted(zones["supply"], key=lambda z: z["strength"], reverse=True)[:3]
-    zones["demand"] = sorted(zones["demand"], key=lambda z: z["strength"], reverse=True)[:3]
+                    "strength": body / atr,
+                    "bar_idx": i
+                }
+                zone_list.append(zone_dict)
+
+    # Second pass: count revisits and track freshness
+    for zone in zone_list:
+        visits = 0
+        zone_low = zone["low"]
+        zone_high = zone["high"]
+        zone_margin = atr * 0.3
+
+        # Count bars after zone creation that touched it
+        for j in range(zone["bar_idx"] + 1, len(data)):
+            bar = data.iloc[j]
+            if zone_low - zone_margin <= float(bar["close"]) <= zone_high + zone_margin:
+                visits += 1
+
+        zone["visits"] = visits
+        zone["fresh"] = visits <= 1
+
+        # Adjust strength based on revisits
+        if visits >= 3:
+            zone["strength"] *= 0.2
+        elif visits == 2:
+            zone["strength"] *= 0.5
+
+        # Add to appropriate list
+        if zone["type"] == "supply":
+            zones["supply"].append(zone)
+        else:
+            zones["demand"].append(zone)
+
+    # Sort by freshness (fresh first) then strength
+    zones["supply"] = sorted(zones["supply"], key=lambda z: (not z["fresh"], -z["strength"]))[:3]
+    zones["demand"] = sorted(zones["demand"], key=lambda z: (not z["fresh"], -z["strength"]))[:3]
     return zones
 
 def _gold_price_in_zone(close, zones, atr):
-    """Check if price is in any supply or demand zone."""
+    """
+    Check if price is in any supply or demand zone.
+    Returns dict with type, fresh status, visits, and strength, or None.
+    """
     margin = atr * 0.3
     for z in zones.get("supply", []):
         if z["low"] - margin <= close <= z["high"] + margin:
-            return "supply"
+            return {
+                "type": "supply",
+                "fresh": z.get("fresh", False),
+                "visits": z.get("visits", 0),
+                "strength": z.get("strength", 0)
+            }
     for z in zones.get("demand", []):
         if z["low"] - margin <= close <= z["high"] + margin:
-            return "demand"
+            return {
+                "type": "demand",
+                "fresh": z.get("fresh", False),
+                "visits": z.get("visits", 0),
+                "strength": z.get("strength", 0)
+            }
     return None
 
 def _gold_fvg_detection(df, direction, lookback=50):
@@ -2010,23 +1779,36 @@ def _gold_choch_detection(df, lookback=40):
         return {"detected": True, "direction": "bearish"}
     return {"detected": False, "direction": None}
 
-def _gold_killzone_bonus():
+def _gold_killzone_bonus(bar_time=None):
     """
     ICT Killzone timing for gold.
-    London Killzone: 07:00-09:00 UTC — highest gold volatility.
-    NY Killzone: 12:00-14:00 UTC — second major move.
-    Returns bonus points.
+    London Killzone: 07:00-09:00 UTC
+    London Close Killzone: 15:00-16:00 UTC
+    NY Killzone: 12:00-14:00 UTC
+    bar_time: optional timestamp to use instead of current time
+    Returns (bonus_points, zone_name).
     """
     from datetime import datetime, timezone
-    now = datetime.now(timezone.utc)
-    h = now.hour
+    if bar_time is not None:
+        try:
+            dt = pd.Timestamp(bar_time)
+            h = dt.hour
+        except Exception:
+            dt = datetime.now(timezone.utc)
+            h = dt.hour
+    else:
+        now = datetime.now(timezone.utc)
+        h = now.hour
+
     if 7 <= h <= 8:
         return 8, "London Killzone"
+    elif 15 <= h <= 16:
+        return 5, "London Close Killzone"
     elif 12 <= h <= 13:
         return 8, "NY Killzone"
     elif 9 <= h <= 11:
         return 3, "London Session"
-    elif 14 <= h <= 16:
+    elif 14 <= h <= 14:
         return 3, "NY Session"
     elif 13 <= h <= 14:
         return 6, "London/NY Overlap"
@@ -2035,11 +1817,14 @@ def _gold_killzone_bonus():
 
 def _gold_rsi_divergence(df, direction, lookback=30):
     """
-    Detect RSI divergence — price making new high/low but RSI not confirming.
+    Detect RSI divergence — both regular and hidden.
+    Regular: price making new high/low but RSI not confirming.
+    Hidden: price making higher low/lower high but RSI making lower low/higher high (continuation).
     Bullish div: price lower low + RSI higher low. Bearish div: price higher high + RSI lower high.
+    Hidden bullish: price higher low + RSI lower low. Hidden bearish: price lower high + RSI higher high.
     """
     if len(df) < lookback:
-        return {"detected": False, "type": None}
+        return {"detected": False, "type": None, "hidden": False}
     data = df.tail(lookback)
     swing_data = []
     for i in range(2, len(data) - 2):
@@ -2053,15 +1838,28 @@ def _gold_rsi_divergence(df, direction, lookback=30):
             swing_data.append({"type": "low", "price": float(r["low"]), "rsi": rsi})
     swing_highs = [s for s in swing_data if s["type"] == "high"]
     swing_lows = [s for s in swing_data if s["type"] == "low"]
+
+    # Regular divergences
     if direction == "Buy" and len(swing_lows) >= 2:
         if (swing_lows[-1]["price"] < swing_lows[-2]["price"] and
             swing_lows[-1]["rsi"] > swing_lows[-2]["rsi"] + 3):
-            return {"detected": True, "type": "bullish_divergence"}
+            return {"detected": True, "type": "bullish_divergence", "hidden": False}
     if direction == "Sell" and len(swing_highs) >= 2:
         if (swing_highs[-1]["price"] > swing_highs[-2]["price"] and
             swing_highs[-1]["rsi"] < swing_highs[-2]["rsi"] - 3):
-            return {"detected": True, "type": "bearish_divergence"}
-    return {"detected": False, "type": None}
+            return {"detected": True, "type": "bearish_divergence", "hidden": False}
+
+    # Hidden divergences (continuation signals)
+    if direction == "Buy" and len(swing_lows) >= 2:
+        if (swing_lows[-1]["price"] > swing_lows[-2]["price"] and
+            swing_lows[-1]["rsi"] < swing_lows[-2]["rsi"] - 3):
+            return {"detected": True, "type": "hidden_bullish_divergence", "hidden": True}
+    if direction == "Sell" and len(swing_highs) >= 2:
+        if (swing_highs[-1]["price"] < swing_highs[-2]["price"] and
+            swing_highs[-1]["rsi"] > swing_highs[-2]["rsi"] + 3):
+            return {"detected": True, "type": "hidden_bearish_divergence", "hidden": True}
+
+    return {"detected": False, "type": None, "hidden": False}
 
 def _gold_momentum_filter(df, direction):
     """
@@ -2135,10 +1933,394 @@ def _gold_candle_quality(df, direction):
 
     return min(10, score)
 
-def gold_engine_score(df, df_h4, df_h1, direction, base_score, base_grade):
+def _gold_detect_bos(df, lookback=50):
     """
-    Gold-specific scoring overlay V2 — Multi-Timeframe + Smart Money hybrid.
-    H4: trend direction. H1: structure & zones. Entry TF: entry signals.
+    Break of Structure (BOS) detection — identifies when price breaks through swing points.
+    Bullish BOS: close > last swing high AND last swing high > previous swing high.
+    Bearish BOS: close < last swing low AND last swing low < previous swing low.
+    Returns dict with bullish_bos, bearish_bos, last_bos_dir, swing_high, swing_low.
+    """
+    if len(df) < lookback:
+        return {"bullish_bos": False, "bearish_bos": False, "last_bos_dir": None, "swing_high": 0, "swing_low": 0}
+
+    data = df.tail(lookback)
+    swing_highs = []
+    swing_lows = []
+
+    # Find swing points (2-bar pivot)
+    for i in range(1, len(data) - 1):
+        r = data.iloc[i]
+        if float(r["high"]) > float(data.iloc[i-1]["high"]) and float(r["high"]) > float(data.iloc[i+1]["high"]):
+            swing_highs.append(float(r["high"]))
+        if float(r["low"]) < float(data.iloc[i-1]["low"]) and float(r["low"]) < float(data.iloc[i+1]["low"]):
+            swing_lows.append(float(r["low"]))
+
+    close = float(data.iloc[-1]["close"])
+    bullish_bos = False
+    bearish_bos = False
+    last_bos_dir = None
+
+    if len(swing_highs) >= 2:
+        # Bullish BOS: price breaks above last swing high, and last > previous
+        if close > swing_highs[-1] and swing_highs[-1] > swing_highs[-2]:
+            bullish_bos = True
+            last_bos_dir = "bullish"
+
+    if len(swing_lows) >= 2:
+        # Bearish BOS: price breaks below last swing low, and last < previous
+        if close < swing_lows[-1] and swing_lows[-1] < swing_lows[-2]:
+            bearish_bos = True
+            last_bos_dir = "bearish"
+
+    swing_high = swing_highs[-1] if swing_highs else 0
+    swing_low = swing_lows[-1] if swing_lows else 0
+
+    return {
+        "bullish_bos": bullish_bos,
+        "bearish_bos": bearish_bos,
+        "last_bos_dir": last_bos_dir,
+        "swing_high": swing_high,
+        "swing_low": swing_low
+    }
+
+def _gold_order_blocks(df, atr, bos, lookback=60):
+    """
+    Identify Order Blocks (OB) — areas where institutions likely have large positions.
+    Break of Structure validated OBs are stronger signals.
+    bos: dict from _gold_detect_bos
+    Returns list of OBs sorted by (bos_confirmed, impulse_strength) descending.
+    """
+    if len(df) < lookback or atr <= 0:
+        return []
+
+    data = df.tail(lookback)
+    obs = []
+    impulse_threshold = atr * 1.5
+
+    for i in range(2, len(data) - 1):
+        curr = data.iloc[i]
+        body = abs(float(curr["close"]) - float(curr["open"]))
+
+        if body > impulse_threshold:
+            # Bullish impulse: strong upcandle = supply OB (where sellers enter)
+            if float(curr["close"]) > float(curr["open"]):
+                ob = {
+                    "type": "bullish",
+                    "high": float(curr["high"]),
+                    "low": float(curr["open"]),
+                    "impulse_strength": body / atr,
+                    "bar_idx": i,
+                    "bos_confirmed": False
+                }
+                # Check if BOS confirmed for this OB
+                if bos.get("bearish_bos"):
+                    ob["bos_confirmed"] = True
+                obs.append(ob)
+            # Bearish impulse: strong downcandle = demand OB (where buyers enter)
+            else:
+                ob = {
+                    "type": "bearish",
+                    "high": float(curr["close"]),
+                    "low": float(curr["low"]),
+                    "impulse_strength": body / atr,
+                    "bar_idx": i,
+                    "bos_confirmed": False
+                }
+                # Check if BOS confirmed for this OB
+                if bos.get("bullish_bos"):
+                    ob["bos_confirmed"] = True
+                obs.append(ob)
+
+    # Check for mitigation: price passed entirely through OB after creation
+    final_close = float(data.iloc[-1]["close"])
+    obs_filtered = []
+    for ob in obs:
+        ob_low = ob["low"]
+        ob_high = ob["high"]
+        margin = atr * 0.2
+
+        # If price hasn't completely passed through OB, keep it
+        if ob["type"] == "bullish":
+            # Bullish OB: valid if price hasn't gone far below low
+            if final_close >= ob_low - margin:
+                obs_filtered.append(ob)
+        else:
+            # Bearish OB: valid if price hasn't gone far above high
+            if final_close <= ob_high + margin:
+                obs_filtered.append(ob)
+
+    # Sort by BOS confirmation first, then impulse strength
+    obs_filtered.sort(key=lambda x: (not x["bos_confirmed"], -x["impulse_strength"]))
+    return obs_filtered[:3]
+
+def _gold_price_at_order_block(close, obs, direction, atr):
+    """
+    Check if current price is at an Order Block.
+    Returns dict with at_ob (bool), strength (float), bos_confirmed (bool).
+    """
+    if not obs:
+        return {"at_ob": False, "strength": 0, "bos_confirmed": False}
+
+    margin = atr * 0.3
+    for ob in obs:
+        if ob["low"] - margin <= close <= ob["high"] + margin:
+            ob_type = ob["type"]
+            # Bullish OB aligns with Buy, Bearish OB aligns with Sell
+            if (ob_type == "bullish" and direction == "Buy") or (ob_type == "bearish" and direction == "Sell"):
+                return {
+                    "at_ob": True,
+                    "strength": ob.get("impulse_strength", 0),
+                    "bos_confirmed": ob.get("bos_confirmed", False)
+                }
+
+    return {"at_ob": False, "strength": 0, "bos_confirmed": False}
+
+def _gold_fibonacci_confluence(df, direction, atr, bos, obs, fvg):
+    """
+    Check for Fibonacci retracement levels with Golden Pocket and OTE zones.
+    bos: dict from _gold_detect_bos
+    obs: list from _gold_order_blocks
+    fvg: dict from _gold_fvg_detection
+    Returns dict with at_fib, level, fib_name, golden_pocket, ote, ote_confluence.
+    """
+    if len(df) < 50 or not bos or bos.get("swing_high", 0) == 0 or bos.get("swing_low", 0) == 0:
+        return {
+            "at_fib": False,
+            "level": 0,
+            "fib_name": None,
+            "golden_pocket": False,
+            "ote": False,
+            "ote_confluence": []
+        }
+
+    close = float(df.iloc[-1]["close"])
+    swing_high = bos.get("swing_high", 0)
+    swing_low = bos.get("swing_low", 0)
+
+    # Standard fibonacci levels: 23.6%, 38.2%, 50%, 61.8%, 78.6%
+    fib_levels = {
+        0.236: "23.6%",
+        0.382: "38.2%",
+        0.5: "50%",
+        0.618: "61.8%",
+        0.786: "78.6%"
+    }
+
+    if direction == "Buy":
+        # Bullish: retracement from swing high to swing low
+        if swing_high <= swing_low:
+            return {
+                "at_fib": False,
+                "level": 0,
+                "fib_name": None,
+                "golden_pocket": False,
+                "ote": False,
+                "ote_confluence": []
+            }
+        range_val = swing_high - swing_low
+        Golden_Pocket_top = swing_high - (range_val * 0.618)
+        Golden_Pocket_bottom = swing_high - (range_val * 0.65)
+        OTE_top = swing_high - (range_val * 0.62)
+        OTE_bottom = swing_high - (range_val * 0.79)
+
+        at_fib = False
+        fib_level = 0
+        fib_name = None
+
+        # Check standard fibs
+        for ratio, name in fib_levels.items():
+            level = swing_high - (range_val * ratio)
+            if level - atr * 0.5 <= close <= level + atr * 0.5:
+                at_fib = True
+                fib_level = level
+                fib_name = f"Fib {name}"
+                break
+
+        golden_pocket = Golden_Pocket_bottom <= close <= Golden_Pocket_top
+        ote = OTE_bottom <= close <= OTE_top
+
+        ote_confluence = []
+        if ote:
+            if obs and _gold_price_at_order_block(close, obs, direction, atr)["at_ob"]:
+                ote_confluence.append("order_block")
+            if fvg and fvg.get("detected") and fvg.get("type") == "bullish_fvg":
+                ote_confluence.append("fvg")
+            if bos.get("bullish_bos"):
+                ote_confluence.append("bos")
+
+    else:  # direction == "Sell"
+        # Bearish: retracement from swing low to swing high
+        if swing_low >= swing_high:
+            return {
+                "at_fib": False,
+                "level": 0,
+                "fib_name": None,
+                "golden_pocket": False,
+                "ote": False,
+                "ote_confluence": []
+            }
+        range_val = swing_high - swing_low
+        Golden_Pocket_bottom = swing_low + (range_val * 0.618)
+        Golden_Pocket_top = swing_low + (range_val * 0.65)
+        OTE_bottom = swing_low + (range_val * 0.62)
+        OTE_top = swing_low + (range_val * 0.79)
+
+        at_fib = False
+        fib_level = 0
+        fib_name = None
+
+        # Check standard fibs
+        for ratio, name in fib_levels.items():
+            level = swing_low + (range_val * ratio)
+            if level - atr * 0.5 <= close <= level + atr * 0.5:
+                at_fib = True
+                fib_level = level
+                fib_name = f"Fib {name}"
+                break
+
+        golden_pocket = Golden_Pocket_bottom <= close <= Golden_Pocket_top
+        ote = OTE_bottom <= close <= OTE_top
+
+        ote_confluence = []
+        if ote:
+            if obs and _gold_price_at_order_block(close, obs, direction, atr)["at_ob"]:
+                ote_confluence.append("order_block")
+            if fvg and fvg.get("detected") and fvg.get("type") == "bearish_fvg":
+                ote_confluence.append("fvg")
+            if bos.get("bearish_bos"):
+                ote_confluence.append("bos")
+
+    return {
+        "at_fib": at_fib,
+        "level": fib_level,
+        "fib_name": fib_name,
+        "golden_pocket": golden_pocket,
+        "ote": ote,
+        "ote_confluence": ote_confluence
+    }
+
+def _gold_bb_squeeze_rsi(df, direction):
+    """
+    Bollinger Band Squeeze + RSI combo.
+    Detects: building pressure (squeeze + RSI extreme), explosion (squeeze release + breakout), extreme (no squeeze but BB/RSI extreme).
+    Returns dict with signal (bool), type (str/None), desc (str/None).
+    """
+    if len(df) < 30:
+        return {"signal": False, "type": None, "desc": None}
+
+    curr = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) >= 2 else curr
+
+    close = float(curr["close"])
+    bb_upper = float(curr.get("bb_upper", 0) or 0)
+    bb_lower = float(curr.get("bb_lower", 0) or 0)
+    bb_mid = (bb_upper + bb_lower) / 2
+    rsi = float(curr.get("rsi14", 50) or 50)
+
+    # ATR for squeeze detection
+    atr = float(curr.get("atr14", 1.0) or 1.0)
+    bb_width = bb_upper - bb_lower
+
+    prev_bb_upper = float(prev.get("bb_upper", 0) or 0)
+    prev_bb_lower = float(prev.get("bb_lower", 0) or 0)
+    prev_bb_width = prev_bb_upper - prev_bb_lower
+
+    # Detect squeeze: BB width < 0.5 × typical ATR
+    squeeze_active = bb_width < atr * 0.5
+    squeeze_just_released = (prev_bb_width < atr * 0.5) and (bb_width >= atr * 0.5)
+
+    signal_detected = False
+    signal_type = None
+    signal_desc = None
+
+    # Building pressure: squeeze + RSI at extreme
+    if squeeze_active:
+        if direction == "Buy" and rsi < 30:
+            signal_detected = True
+            signal_type = "building_pressure_bullish"
+            signal_desc = "Squeeze + RSI oversold = building bullish pressure"
+        elif direction == "Sell" and rsi > 70:
+            signal_detected = True
+            signal_type = "building_pressure_bearish"
+            signal_desc = "Squeeze + RSI overbought = building bearish pressure"
+
+    # Explosion: squeeze released with breakout
+    if squeeze_just_released:
+        if direction == "Buy" and close > bb_mid:
+            signal_detected = True
+            signal_type = "explosion_bullish"
+            signal_desc = "Squeeze released + bullish breakout"
+        elif direction == "Sell" and close < bb_mid:
+            signal_detected = True
+            signal_type = "explosion_bearish"
+            signal_desc = "Squeeze released + bearish breakout"
+
+    # Extreme without squeeze
+    if not squeeze_active and not squeeze_just_released:
+        if direction == "Buy" and close > bb_upper and rsi < 40:
+            signal_detected = True
+            signal_type = "bb_rsi_extreme_bullish"
+            signal_desc = "Price above BB + RSI divergence (bullish)"
+        elif direction == "Sell" and close < bb_lower and rsi > 60:
+            signal_detected = True
+            signal_type = "bb_rsi_extreme_bearish"
+            signal_desc = "Price below BB + RSI divergence (bearish)"
+
+    return {
+        "signal": signal_detected,
+        "type": signal_type,
+        "desc": signal_desc
+    }
+
+def _gold_round_number(close, atr):
+    """
+    Check proximity to round numbers (100, 50, 25 intervals).
+    Returns dict with near_round (bool), level (float), type (str), distance_atr (float).
+    """
+    if atr <= 0:
+        return {"near_round": False, "level": 0, "type": None, "distance_atr": 0}
+
+    margin_atr = 0.5  # Within 0.5 × ATR
+    margin = margin_atr * atr
+
+    # Ultra major: $100 intervals
+    for level in range(0, 2500, 100):
+        if abs(close - level) < margin:
+            return {
+                "near_round": True,
+                "level": level,
+                "type": "ultra_major",
+                "distance_atr": abs(close - level) / atr
+            }
+
+    # Major: $50 intervals
+    for level in range(0, 2500, 50):
+        if level % 100 != 0 and abs(close - level) < margin:
+            return {
+                "near_round": True,
+                "level": level,
+                "type": "major",
+                "distance_atr": abs(close - level) / atr
+            }
+
+    # Minor: $25 intervals
+    for level in range(0, 2500, 25):
+        if level % 50 != 0 and abs(close - level) < margin:
+            return {
+                "near_round": True,
+                "level": level,
+                "type": "minor",
+                "distance_atr": abs(close - level) / atr
+            }
+
+    return {"near_round": False, "level": 0, "type": None, "distance_atr": 0}
+
+def gold_engine_score(df, df_h4, df_h1, direction, base_score, base_grade, bar_time=None):
+    """
+    Gold-specific scoring overlay V4 — 17-module Smart Money hybrid system.
+    H4: trend direction. H1: structure & zones. Entry TF: entry signals & confluence.
+    Now includes: BOS detection, Order Blocks, Fibonacci confluence with Golden Pocket & OTE,
+    BB Squeeze+RSI, Round Numbers, and enhanced RSI divergence (hidden divergences).
     Returns: (adjusted_score, gold_info_dict, adjusted_grade, extra_warns)
     """
     row   = df.iloc[-1]
@@ -2187,29 +2369,37 @@ def gold_engine_score(df, df_h4, df_h1, direction, base_score, base_grade):
         gold_info["mtf_alignment"] = "opposed"
         extra_warns.append("🚫 All timeframes OPPOSE direction — avoid trade")
 
-    # ── MODULE 2: Supply & Demand Zones ──────────────────────
-    # Use H1 data for better zone detection (wider view)
+    # ── MODULE 2: Supply & Demand Zones (Enhanced with Freshness) ──────────────────────
     zone_df = df_h1 if df_h1 is not None and len(df_h1) >= 50 else df
     zones = _gold_supply_demand_zones(zone_df, lookback=80)
     zone_position = _gold_price_in_zone(close, zones, atr)
-    gold_info["zones"] = {"supply_count": len(zones["supply"]), "demand_count": len(zones["demand"]), "position": zone_position}
+    gold_info["zones"] = {
+        "supply_count": len(zones["supply"]),
+        "demand_count": len(zones["demand"]),
+        "position": zone_position
+    }
 
-    if zone_position == "demand" and direction == "Buy":
-        bonus += 10
-        confirmations += 1
-        extra_warns.append("🏦 Price in DEMAND zone — supports Buy")
-    elif zone_position == "supply" and direction == "Sell":
-        bonus += 10
-        confirmations += 1
-        extra_warns.append("🏦 Price in SUPPLY zone — supports Sell")
-    elif zone_position == "demand" and direction == "Sell":
-        bonus -= 8
-        contradictions += 1
-        extra_warns.append("⚠ Price in DEMAND zone — risky Sell")
-    elif zone_position == "supply" and direction == "Buy":
-        bonus -= 8
-        contradictions += 1
-        extra_warns.append("⚠ Price in SUPPLY zone — risky Buy")
+    if zone_position:
+        zone_type = zone_position.get("type")
+        zone_fresh = zone_position.get("fresh", False)
+        zone_visits = zone_position.get("visits", 0)
+
+        if zone_type == "demand" and direction == "Buy":
+            bonus += 12 if zone_fresh else (6 if zone_visits == 2 else 2)
+            confirmations += 1
+            extra_warns.append(f"🏦 Price in DEMAND zone (fresh={zone_fresh}, visits={zone_visits}) — supports Buy")
+        elif zone_type == "supply" and direction == "Sell":
+            bonus += 12 if zone_fresh else (6 if zone_visits == 2 else 2)
+            confirmations += 1
+            extra_warns.append(f"🏦 Price in SUPPLY zone (fresh={zone_fresh}, visits={zone_visits}) — supports Sell")
+        elif zone_type == "demand" and direction == "Sell":
+            bonus -= 8
+            contradictions += 1
+            extra_warns.append("⚠ Price in DEMAND zone — risky Sell")
+        elif zone_type == "supply" and direction == "Buy":
+            bonus -= 8
+            contradictions += 1
+            extra_warns.append("⚠ Price in SUPPLY zone — risky Buy")
 
     # ── MODULE 3: Fair Value Gap (FVG) ───────────────────────
     fvg = _gold_fvg_detection(df, direction, lookback=50)
@@ -2233,8 +2423,8 @@ def gold_engine_score(df, df_h4, df_h1, direction, base_score, base_grade):
             contradictions += 1
             extra_warns.append(f"⚠ CHoCH OPPOSES direction — {choch['direction']} shift detected")
 
-    # ── MODULE 5: ICT Killzone Timing ────────────────────────
-    kz_bonus, kz_name = _gold_killzone_bonus()
+    # ── MODULE 5: ICT Killzone Timing (Enhanced with London Close) ────────────────────────
+    kz_bonus, kz_name = _gold_killzone_bonus(bar_time=bar_time)
     bonus += kz_bonus
     gold_info["killzone"] = kz_name
     if kz_bonus >= 6:
@@ -2243,13 +2433,14 @@ def gold_engine_score(df, df_h4, df_h1, direction, base_score, base_grade):
     elif kz_bonus < 0:
         extra_warns.append(f"⚠ {kz_name} — low volatility, avoid gold trades")
 
-    # ── MODULE 6: RSI Divergence ─────────────────────────────
+    # ── MODULE 6: RSI Divergence (Now includes Hidden Divergence) ─────────────────────
     rsi_div = _gold_rsi_divergence(df, direction, lookback=30)
     gold_info["rsi_divergence"] = rsi_div
     if rsi_div["detected"]:
-        bonus += 8
+        is_hidden = rsi_div.get("hidden", False)
+        bonus += 6 if is_hidden else 8
         confirmations += 1
-        extra_warns.append(f"📈 RSI Divergence: {rsi_div['type']} — reversal signal")
+        extra_warns.append(f"📈 RSI Divergence: {rsi_div['type']} (hidden={is_hidden}) — signal detected")
 
     # ── MODULE 7: Liquidity Sweep ────────────────────────────
     sweep = _gold_liquidity_sweep(df, atr)
@@ -2266,7 +2457,7 @@ def gold_engine_score(df, df_h4, df_h1, direction, base_score, base_grade):
             extra_warns.append(f"⚠ Liquidity sweep OPPOSES {direction}")
 
     # ── MODULE 8: Asian Range Breakout ───────────────────────
-    asian = _gold_asian_range(df)
+    asian = _gold_asian_range(df, bar_time=bar_time)
     gold_info["asian_range"] = asian
     if asian["valid"]:
         breakout = _gold_breakout_signal(df, asian, atr)
@@ -2279,14 +2470,68 @@ def gold_engine_score(df, df_h4, df_h1, direction, base_score, base_grade):
             bonus -= 3
             extra_warns.append("⚠ Gold inside Asian range — wait for breakout")
 
-    # ── MODULE 9: Gold Momentum Filter ───────────────────────
+    # ── MODULE 9: Break of Structure (BOS) Detection ────────────────────────
+    bos = _gold_detect_bos(df, lookback=50)
+    gold_info["bos"] = bos
+    if bos.get("last_bos_dir"):
+        if (bos["last_bos_dir"] == "bullish" and direction == "Buy") or \
+           (bos["last_bos_dir"] == "bearish" and direction == "Sell"):
+            bonus += 8
+            confirmations += 1
+            extra_warns.append(f"🚀 BOS detected — {bos['last_bos_dir'].upper()} structure break")
+
+    # ── MODULE 10: Order Blocks (BOS-Validated) ────────────────────────────
+    obs = _gold_order_blocks(df, atr, bos, lookback=60)
+    gold_info["order_blocks"] = {
+        "count": len(obs),
+        "bos_confirmed": sum(1 for ob in obs if ob.get("bos_confirmed"))
+    }
+    ob_signal = _gold_price_at_order_block(close, obs, direction, atr)
+    if ob_signal["at_ob"]:
+        bonus += 12 if ob_signal["bos_confirmed"] else 6
+        confirmations += 1
+        extra_warns.append(f"📦 At Order Block (BOS-confirmed={ob_signal['bos_confirmed']}, strength={ob_signal['strength']:.1f})")
+
+    # ── MODULE 11: Fibonacci Confluence (Golden Pocket + OTE) ─────────────────────────
+    fib_conf = _gold_fibonacci_confluence(df, direction, atr, bos, obs, fvg)
+    gold_info["fibonacci"] = fib_conf
+    if fib_conf["ote"]:
+        bonus += 15
+        confirmations += 1
+        confluence_list = ", ".join(fib_conf["ote_confluence"])
+        extra_warns.append(f"✨ OTE zone with confluence: {confluence_list}")
+    elif fib_conf["golden_pocket"]:
+        bonus += 10
+        confirmations += 1
+        extra_warns.append(f"🌟 Golden Pocket Fibonacci zone (61.8-65%)")
+    elif fib_conf["at_fib"]:
+        bonus += 6
+        extra_warns.append(f"📐 At Fibonacci {fib_conf['fib_name']} level")
+
+    # ── MODULE 12: Bollinger Band Squeeze + RSI Combo ─────────────────────
+    bb_rsi = _gold_bb_squeeze_rsi(df, direction)
+    gold_info["bb_rsi"] = bb_rsi
+    if bb_rsi["signal"]:
+        bonus += 7
+        confirmations += 1
+        extra_warns.append(f"🔌 {bb_rsi['desc']}")
+
+    # ── MODULE 13: Round Numbers ──────────────────────────────
+    rnd = _gold_round_number(close, atr)
+    gold_info["round_number"] = rnd
+    if rnd["near_round"]:
+        round_bonus = 5 if rnd["type"] == "ultra_major" else (4 if rnd["type"] == "major" else 3)
+        bonus += round_bonus
+        extra_warns.append(f"🎯 Near {rnd['type'].upper()} round number ${rnd['level']:.0f}")
+
+    # ── MODULE 14: Gold Momentum Filter ───────────────────────
     mom_bonus = _gold_momentum_filter(df, direction)
     gold_info["momentum_bonus"] = mom_bonus
     bonus += mom_bonus
     if mom_bonus >= 10:
         confirmations += 1
 
-    # ── MODULE 10: Overextension Guard ───────────────────────
+    # ── MODULE 15: Overextension Guard ───────────────────────
     if len(df) >= 20:
         c20 = float(df.iloc[-20]["close"])
         move_20 = abs(close - c20)
@@ -2295,7 +2540,7 @@ def gold_engine_score(df, df_h4, df_h1, direction, base_score, base_grade):
             contradictions += 1
             extra_warns.append(f"⚠ Gold overextended: {move_20:.2f} in 20 bars ({move_20/atr:.1f}× ATR)")
 
-    # ── MODULE 11: Market Structure ──────────────────────────
+    # ── MODULE 16: Market Structure ──────────────────────────
     structure_ok = _gold_structure_check(df, direction)
     gold_info["structure_ok"] = structure_ok
     if structure_ok:
@@ -2304,6 +2549,17 @@ def gold_engine_score(df, df_h4, df_h1, direction, base_score, base_grade):
     else:
         bonus -= 5
         extra_warns.append("⚠ Market structure does not support direction")
+
+    # ── MODULE 17: Candle Quality ────────────────────────────
+    candle_qual = _gold_candle_quality(df, direction)
+    gold_info["candle_quality"] = candle_qual
+    if candle_qual >= 8:
+        bonus += 5
+        confirmations += 1
+        extra_warns.append(f"🕯️ High-quality entry candle (score={candle_qual}/10)")
+    elif candle_qual >= 5:
+        bonus += 2
+        extra_warns.append(f"🕯️ Good entry candle (score={candle_qual}/10)")
 
     # ── FINAL SCORING ────────────────────────────────────────
     gold_info["confirmations"] = confirmations
@@ -2319,7 +2575,6 @@ def gold_engine_score(df, df_h4, df_h1, direction, base_score, base_grade):
     gold_info["adjusted_score"] = adjusted_score
 
     # Re-grade with adjusted score + STRICT safety gates
-    # A/A+ requires H4 alignment (h4_pts=25 from base score)
     if   adjusted_score >= c["grade_aplus"] and h4_ok: adjusted_grade = "A+"
     elif adjusted_score >= c["grade_a"]     and h4_ok: adjusted_grade = "A"
     elif adjusted_score >= c["grade_b"]:               adjusted_grade = "B"
@@ -2416,25 +2671,6 @@ def analyze_symbol(symbol, interval, bars, td_key):
     # ── Smart Entry ────────────────────────────────────────────
     smart_entry = calculate_smart_entry(df, direction, close, atr, symbol)
 
-    # ── GROK PRIMARY ANALYSIS ─────────────────────────────────
-    grok_result = None
-    xai_key = get_xai_key()
-    if xai_key:
-        try:
-            last_10 = df[["open","high","low","close"]].tail(10).round(cfg(symbol)["dec"]).to_string(index=False)
-            grok_result = grok_primary_analysis(
-                symbol=symbol, close=close, atr=atr, rsi=rsi_val,
-                macd_val=macd_val, macd_hist=macd_hist_val,
-                ema20=ema20_val, ema50=ema50_val, ema200=ema200_val,
-                h4_trend=_h4_trend(df_h4), session_name=sess_name,
-                calc_direction=direction, calc_score=score, calc_grade=grade,
-                sl_calc=levels["sl"], tp1_calc=levels["tp1"], tp2_calc=levels["tp2"],
-                last_10_bars_str=last_10, xai_key=xai_key,
-                bb_upper=bb_upper, bb_lower=bb_lower,
-            )
-        except Exception:
-            grok_result = None
-
     return {
         "symbol": symbol, "df": df, "df_h4": df_h4, "df_h1": df_h1,
         "close": close, "atr": atr,
@@ -2451,7 +2687,6 @@ def analyze_symbol(symbol, interval, bars, td_key):
         "spike": spike_info,
         "gold": gold_info,
         "smart_entry": smart_entry,
-        "grok": grok_result,  # Grok-primary AI analysis
         "error": None,
     }
 
@@ -2562,8 +2797,9 @@ def render_score_breakdown(bd, score, grade):
             f"<div class='mono-title'>SIGNAL SCORE</div>"
             f"<div style='font-family:Space Mono,monospace;font-size:28px;font-weight:700;"
             f"color:{gc};margin-bottom:10px;'>{score} <span style='font-size:14px;'>{grade}</span></div>")
-    maxes = {"H4 Trend":25,"EMA Stack":20,"Pullback":15,"MACD":15,"RSI":10,"Candle":10,"Session":5}
+    maxes = {"H4 Trend":25,"Pullback":25,"EMA Stack":15,"RSI":15,"Candle":10,"Session":5,"MACD":5}
     for k, v in bd.items():
+        if not isinstance(v, (int, float)): continue  # skip non-numeric entries
         mx  = maxes.get(k, 10)
         pct = int(v/mx*100) if mx else 0
         bar_col = "#00d4aa" if pct>=80 else "#f59e0b" if pct>=40 else "#ef4444"
@@ -2782,44 +3018,7 @@ def render_trade_tracker(symbol, current_price, a=None, td_key=""):
                 except Exception:
                     pass
 
-            # ── AI advisor button & response ──────────────────────
-            ai_key   = f"_ai_advice_{tid}"
-            btn_col, _ = st.columns([1, 3])
-            with btn_col:
-                if st.button("🤖 Ask AI", key=f"btn_ai_{tid}", help="Get HOLD / EXIT / MOVE SL recommendation from Grok"):
-                    with st.spinner("Asking Grok…"):
-                        advice = get_ai_trade_advice(
-                            t, live,
-                            a if a else {},
-                            st.session_state.get("last_news_{}".format(symbol), {})
-                        )
-                    st.session_state[ai_key] = advice
-
-            if st.session_state.get(ai_key):
-                adv_text = st.session_state[ai_key]
-                # Choose colour hint based on action word
-                adv_upper = adv_text.upper()
-                if "EXIT NOW" in adv_upper or "EXIT" in adv_upper[:60]:
-                    adv_border = "#ef4444"; adv_bg = "rgba(239,68,68,0.07)"
-                elif "MOVE SL" in adv_upper or "BREAKEVEN" in adv_upper:
-                    adv_border = "#f59e0b"; adv_bg = "rgba(245,158,11,0.07)"
-                elif "PARTIAL" in adv_upper:
-                    adv_border = "#a78bfa"; adv_bg = "rgba(167,139,250,0.07)"
-                else:
-                    adv_border = "#6366f1"; adv_bg = "rgba(99,102,241,0.07)"
-                st.markdown(
-                    f"<div style='background:{adv_bg};border:1px solid {adv_border}44;"
-                    f"border-left:3px solid {adv_border};border-radius:8px;"
-                    f"padding:10px 13px;margin:4px 0 8px;font-size:12px;color:#c7d2fe;line-height:1.75;'>"
-                    f"<span style='font-size:10px;color:{adv_border};font-family:Space Mono,monospace;"
-                    f"letter-spacing:.08em;'>🤖 GROK ADVISOR</span><br><br>"
-                    + adv_text.replace("\n","<br>") +
-                    f"</div>", unsafe_allow_html=True
-                )
-                clr_col, _ = st.columns([1, 4])
-                with clr_col:
-                    if st.button("✕ Clear advice", key=f"btn_ai_clr_{tid}"):
-                        st.session_state.pop(ai_key, None); st.rerun()
+            # ── AI advisor removed ──────────────────────
 
             ck = f"_closing_{tid}"
             if not st.session_state.get(ck):
@@ -2847,77 +3046,6 @@ def render_trade_tracker(symbol, current_price, a=None, td_key=""):
     return None
 
 # ============================================================
-# AUTO PRE-MARKET / DAILY BIAS (Grok)
-# ============================================================
-@st.cache_data(ttl=3600)  # 1-hour cache — auto-refreshes each hour
-def _auto_premarket_bias(xai_key: str, symbols_csv: str, cal_text: str, hist_text: str):
-    """
-    Auto-generate per-symbol bias using Grok.
-    Returns dict like {"EURUSD": {"bias":"bull","conf":"HIGH","note":"..."}, ...}
-    Cached 1 hour so it doesn't spam the API.
-    """
-    now_utc = pd.Timestamp.utcnow()
-    msg = (
-        f"QUICK MARKET BIAS — {now_utc.strftime('%Y-%m-%d %H:%M UTC')} ({now_utc.strftime('%A')})\n"
-        f"Symbols: {symbols_csv}\n"
-    )
-    if cal_text:
-        msg += f"\nUPCOMING EVENTS:\n{cal_text}\n"
-    if hist_text:
-        msg += f"\nTRADER PERFORMANCE:\n{hist_text}\n"
-    msg += (
-        f"\nFor EACH symbol return a JSON object with:\n"
-        f'  "SYM": {{"bias":"bull|bear|neutral","conf":"HIGH|MED|LOW","note":"<12 words max>"}}\n'
-        f"Return ONLY a single JSON object containing all symbols. No markdown.\n"
-        f"Base your bias on: current trends, upcoming events, session timing, and the trader's personal data."
-    )
-    raw = _grok([
-        {"role":"system","content":"You are a forex analyst. Return ONLY valid JSON. "
-         f"UTC: {now_utc.strftime('%Y-%m-%d %H:%M')}"},
-        {"role":"user","content":msg}
-    ], max_tokens=600, temperature=0.1, api_key=xai_key)
-    if not raw or raw.startswith("[Grok"):
-        return {}
-    try:
-        return json.loads(re.sub(r"```json|```","",raw).strip())
-    except Exception:
-        return {}
-
-def _get_premarket_data():
-    """Gather calendar + history data and call auto bias. Returns bias dict."""
-    xai_key = get_xai_key()
-    if not xai_key:
-        return {}
-    # Economic calendar
-    cal_text = ""
-    te_key = get_te_key()
-    if te_key:
-        events = fetch_te_calendar(te_key)
-        if events:
-            lines = []
-            for e in events[:15]:
-                imp = "HIGH" if e["importance"]=="HIGH" else e["importance"]
-                lines.append(f"  {e['date'].strftime('%a %H:%M')} [{e['country'].title()}] [{imp}] {e['event']}")
-            cal_text = "\n".join(lines)
-    # Trader history
-    hist_text = ""
-    if _sb_ok():
-        journal = sb_get("journal", "order=closed_at.desc&limit=50")
-        if journal:
-            df_j = pd.DataFrame(journal)
-            df_j["pnl_r"] = pd.to_numeric(df_j["pnl_r"], errors="coerce").fillna(0)
-            try:
-                by_sym = df_j.groupby("symbol").agg(
-                    trades=("pnl_r","count"),
-                    wr=("outcome", lambda x: f"{(x=='WIN').sum()}/{len(x)}"),
-                    avg_r=("pnl_r","mean")
-                ).round(2)
-                hist_text = by_sym.to_string()
-            except Exception:
-                pass
-    return _auto_premarket_bias(xai_key, ",".join(ACTIVE_SYMBOLS), cal_text, hist_text)
-
-# ============================================================
 # PAGE 1 — MARKET OVERVIEW
 # ============================================================
 def page_overview():
@@ -2927,9 +3055,6 @@ def page_overview():
     if not td_key:
         st.warning("⚠ Add your Twelve Data API key in the sidebar to load analysis.")
         return
-
-    # AI Market Bias removed — Grok Primary Analysis now covers fundamentals
-    # in its unified signal output (no more separate bias badges that can conflict)
 
     interval = st.session_state.get("ov_interval","15min")
     cols = st.columns(3)
@@ -2963,31 +3088,10 @@ def page_overview():
                     f"padding:3px 8px;font-size:10px;color:{sp_col};font-family:Space Mono,monospace;"
                     f"margin-top:4px;'>{sp_info['message']}</div>")
 
-            # ── AI data ───────────────────────────────────────────
-            grok = a.get("grok")
-            if grok and not grok.get("error"):
-                grok_ai_r = grok.get("ai_rating", 0)
-                ai_dir = grok.get("direction", a["direction"])
-                ai_action = grok.get("action", "WAIT")
-                ai_conf = grok.get("confidence", "LOW")
-                # News impact
-                news_html = ""
-                news_imp = grok.get("news_impact","")
-                if news_imp:
-                    news_html = f"<div style='font-size:10px;color:#a78bfa;margin-top:4px;font-family:Space Mono,monospace;'>📰 {news_imp}</div>"
-                # Risk warning
-                risk_html = ""
-                risk_warn = grok.get("risk_warning","")
-                if risk_warn and risk_warn.lower() != "none":
-                    risk_html = f"<div style='font-size:10px;color:#f59e0b;margin-top:3px;font-family:Space Mono,monospace;'>⚠ {risk_warn}</div>"
-            else:
-                # Fallback: no Grok data
-                grok_ai_r = 0
-                ai_dir = a["direction"]
-                ai_action = a["direction"]
-                ai_conf = ""
-                news_html = ""
-                risk_html = ""
+            # ── No AI comparison anymore ──────────────────────────
+            ai_dir = a["direction"]
+            news_html = ""
+            risk_html = ""
 
             st.markdown(
                 f"<div style='background:#0d1117;border:1px solid {'rgba(239,68,68,0.3)' if sp_info.get('alert_level') == 'danger' else 'rgba(255,255,255,0.07)'};border-radius:10px;"
@@ -3007,8 +3111,6 @@ def page_overview():
                 f"{a['grade']} ({a['score']})</span>"
                 f"<span style='font-family:Space Mono,monospace;font-size:13px;font-weight:700;color:{dc};'>"
                 f"{'▲' if a['direction']=='Buy' else ('▼' if a['direction']=='Sell' else '◈')} {a['direction']}</span>"
-                f"<span style='font-size:10px;color:{'#10b981' if ai_dir == a['direction'] else '#f59e0b'};font-family:Space Mono,monospace;'>"
-                f"{'AI ✅' if ai_dir == a['direction'] else 'AI ⚠'}</span>"
                 f"</div>"
                 # Technicals row
                 f"<div style='display:flex;gap:12px;font-size:11px;'>"
@@ -3091,56 +3193,10 @@ def page_symbol(symbol):
             f"<span style='font-size:10px;color:#4a5568;margin-left:8px;'>{price_src}</span></div>",
             unsafe_allow_html=True)
     with t3:
-        # AI double-confirm status
-        _g = a.get("grok")
-        _g_dir = _g.get("direction", a["direction"]) if _g and not _g.get("error") else a["direction"]
-        _g_agrees = _g_dir == a["direction"]
-        _g_col = "#10b981" if _g_agrees else "#f59e0b"
-        _g_txt = "AI ✅" if _g_agrees else "AI ⚠"
-        st.markdown(f"<div style='font-family:Space Mono,monospace;font-size:11px;color:{_g_col};padding-top:8px;'>{_g_txt}</div>", unsafe_allow_html=True)
-    with t4:
         mkt_c = "#10b981" if mkt=="LIVE" else "#f59e0b"
         st.markdown(f"<span style='font-family:Space Mono,monospace;font-size:11px;color:{mkt_c};'>{mkt}</span>",unsafe_allow_html=True)
 
-    # ── AI ANALYSIS PANEL ────────────────────────────────────
-    grok = a.get("grok")
-    if grok and not grok.get("error"):
-        grok_ai_r = grok.get("ai_rating", 0)
-        ai_dir = grok.get("direction", a["direction"])
-        ai_action = grok.get("action", "WAIT")
-        ai_conf = grok.get("confidence", "LOW")
-        ai_col = "#10b981" if grok_ai_r >= 7 else ("#f59e0b" if grok_ai_r >= 5 else "#ef4444")
-        ai_dc  = "#10b981" if ai_dir=="Buy" else ("#ef4444" if ai_dir=="Sell" else "#8b9ab0")
-        conf_col = "#10b981" if ai_conf=="HIGH" else ("#f59e0b" if ai_conf=="MEDIUM" else "#4a5568")
-        border_col = ai_col
-        agrees = grok.get("agrees_with_calculator", ai_dir == a["direction"])
-
-        reasoning = grok.get("reasoning", "")
-        key_factors = grok.get("key_factors", [])
-        news_imp = grok.get("news_impact", "")
-        risk_warn = grok.get("risk_warning", "")
-        factors_html = "".join(f"<span style='font-size:10px;color:#a78bfa;background:rgba(167,139,250,0.1);"
-                               f"padding:2px 8px;border-radius:3px;margin-right:6px;'>{f}</span>" for f in key_factors[:4])
-
-        # AI as secondary reference — no big rating, no direction, just text insight
-        _agree_icon = "✅ Agrees" if agrees else "⚠ Disagrees"
-        _agree_col = "#10b981" if agrees else "#f59e0b"
-        st.markdown(
-            f"<div style='background:rgba(13,17,23,0.8);border:1px solid rgba(255,255,255,0.08);"
-            f"border-radius:8px;padding:12px 16px;margin:12px 0;'>"
-            f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;'>"
-            f"<span style='font-family:Space Mono,monospace;font-size:10px;color:#8b9ab0;letter-spacing:.1em;'>AI REFERENCE (Grok)</span>"
-            f"<span style='font-size:10px;color:{_agree_col};font-family:Space Mono,monospace;'>"
-            f"{_agree_icon} with Calculator | Ref: {grok_ai_r}/10</span></div>"
-            # Reasoning text only
-            f"<div style='font-size:12px;color:#c9d1d9;margin-bottom:8px;line-height:1.5;'>{reasoning}</div>"
-            # Key factors
-            f"<div style='margin-bottom:6px;'>{factors_html}</div>"
-            # News + Risk
-            + (f"<div style='font-size:11px;color:#a78bfa;margin-bottom:4px;'>📰 {news_imp}</div>" if news_imp else "")
-            + (f"<div style='font-size:11px;color:#f59e0b;'>⚠ {risk_warn}</div>" if risk_warn and risk_warn.lower() != "none" else "")
-            + f"</div>",
-            unsafe_allow_html=True)
+    # ── Signal Warnings ───────────────────────────────────────
 
     # ── Warnings ─────────────────────────────────────────────
     if a["warns"]:
@@ -3350,71 +3406,41 @@ def page_symbol(symbol):
         with st.expander("📊 Calculator Breakdown (Backup)", expanded=False):
             render_score_breakdown(a["bd"], a["score"], a["grade"])
 
-        # ── Signal alert: Unified score Grade A/A+ ──────────────
-        grok_rating = grok.get("ai_rating", 0) if grok and not grok.get("error") else 0
-        _uni_s = a["score"]  # Use calculator score directly, AI is reference only
+        # ── Signal alert: Calculator-based Grade A/A+ ──────────────
+        _uni_s = a["score"]  # Use calculator score directly
         _uni_s = max(0, min(100, _uni_s))
         _c_alert = cfg(symbol)
         _uni_triggered = _uni_s >= _c_alert.get("grade_a", 76)
         calc_triggered = a["grade"] in ("A+", "A")
-        grok_triggered = _uni_triggered  # Use unified instead of raw AI rating
-        alert_key    = f"_alerted_{symbol}_{a['grade']}_{a['direction']}_{a['score']}_{grok_rating}"
-        ai_vfy_key   = f"_ai_vfy_{symbol}_{a['grade']}_{a['direction']}_{a['score']}"
-        if (grok_triggered or calc_triggered) and not st.session_state.get(alert_key):
-            # Run AI verification once per unique signal
-            if ai_vfy_key not in st.session_state:
-                with st.spinner("🤖 AI verifying signal…"):
-                    st.session_state[ai_vfy_key] = verify_signal_with_ai(
-                        symbol, a["grade"], a["direction"], a["score"], a)
-            if st.session_state.get(ai_vfy_key):
-                fire_signal_alert(symbol, a["grade"], a["direction"], a["score"])
-                st.session_state[alert_key] = True
-                # Log to signals DB
-                log_signal_to_db(symbol, a["direction"], a["grade"], a["score"],
-                                 True, a.get("session","?"), a.get("rsi",50), a.get("h4_trend","?"))
-                _grok_label = f" | AI Rating: {grok_rating}/10" if grok_rating else ""
-                st.markdown(
-                    f"<div style='background:rgba(0,212,170,0.1);border:1px solid #00d4aa;"
-                    f"border-left:3px solid #00d4aa;border-radius:6px;padding:8px 12px;margin:6px 0;"
-                    f"font-size:12px;color:#00d4aa;font-family:Space Mono,monospace;animation:alertpulse 1.5s 3;'>"
-                    f"🔔 SIGNAL — AI CONFIRMED ✅ — {a['direction']} {symbol} (Calc: {a['grade']} {a['score']}/100{_grok_label})"
-                    f"</div>", unsafe_allow_html=True)
-            else:
-                st.session_state[alert_key] = True  # mark as handled, no alert
-                # Log rejected signal to DB
-                log_signal_to_db(symbol, a["direction"], a["grade"], a["score"],
-                                 False, a.get("session","?"), a.get("rsi",50), a.get("h4_trend","?"))
-                st.markdown(
-                    f"<div style='background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.3);"
-                    f"border-left:3px solid #f59e0b;border-radius:6px;padding:8px 12px;margin:6px 0;"
-                    f"font-size:12px;color:#fcd34d;font-family:Space Mono,monospace;'>"
-                    f"⚠ {a['grade']} SIGNAL — AI NOT CONFIRMED — {a['direction']} {symbol} ({a['score']}/100). Skip or verify manually."
-                    f"</div>", unsafe_allow_html=True)
+        alert_key    = f"_alerted_{symbol}_{a['grade']}_{a['direction']}_{a['score']}"
+        if (calc_triggered) and not st.session_state.get(alert_key):
+            fire_signal_alert(symbol, a["grade"], a["direction"], a["score"])
+            st.session_state[alert_key] = True
+            # Log to signals DB
+            log_signal_to_db(symbol, a["direction"], a["grade"], a["score"],
+                             True, a.get("session","?"), a.get("rsi",50), a.get("h4_trend","?"))
+            st.markdown(
+                f"<div style='background:rgba(0,212,170,0.1);border:1px solid #00d4aa;"
+                f"border-left:3px solid #00d4aa;border-radius:6px;padding:8px 12px;margin:6px 0;"
+                f"font-size:12px;color:#00d4aa;font-family:Space Mono,monospace;animation:alertpulse 1.5s 3;'>"
+                f"🔔 {a['grade']} SIGNAL — {a['direction']} {symbol} ({a['score']}/100)"
+                f"</div>", unsafe_allow_html=True)
 
-        # News — Trading Economics first, Grok fallback
+        # News — Trading Economics only
         news_key = f"news_{symbol}"
         te_key   = get_te_key()
-        nb1, nb2 = st.columns([2,1])
         if te_key:
-            if nb1.button(f"📅 Load News (TE)", key=f"news_btn_{symbol}"):
-                with st.spinner("Fetching economic calendar…"):
+            if st.button(f"📅 Load Economic Calendar", key=f"news_btn_{symbol}"):
+                with st.spinner("Fetching Trading Economics calendar…"):
                     st.session_state[news_key] = get_te_news_for_symbol(symbol, te_key)
         else:
-            if nb1.button(f"🗞 Load News (Grok)", key=f"news_btn_{symbol}"):
-                with st.spinner("Getting Grok news…"):
-                    st.session_state[news_key] = get_news_sentiment(symbol, get_xai_key())
-        # Manual Grok fallback button if TE key exists
-        if te_key:
-            if nb2.button("🤖 Grok", key=f"grok_news_btn_{symbol}", help="Use Grok AI news instead"):
-                with st.spinner("Asking Grok…"):
-                    st.session_state[news_key] = get_news_sentiment(symbol, get_xai_key())
+            st.info("⚠ Add Trading Economics key in sidebar to load economic calendar")
 
         news = st.session_state.get(news_key)
         if news:
             rc_    = {"HIGH":"#ef4444","MEDIUM":"#f59e0b","LOW":"#10b981"}.get(news["risk"],"#8b9ab0")
             adj_   = f"+{news['adj']}" if news["adj"]>0 else str(news["adj"])
-            source = news.get("source","Grok")
-            title  = "📅 TE CALENDAR" if source=="TE" else "🤖 GROK NEWS"
+            title  = "📅 ECONOMIC CALENDAR"
             st.markdown(
                 f"<div class='panel'>"
                 f"<div class='mono-title'>{title}</div>"
@@ -3425,21 +3451,7 @@ def page_symbol(symbol):
                 f"<div style='font-size:12px;color:#e8edf2;margin-bottom:6px;'>{news['summary']}</div>"
                 + "".join(f"<div style='font-size:11px;color:#8b9ab0;margin-bottom:2px;'>▸ {e}</div>" for e in news.get("events",[]))
                 + "</div>", unsafe_allow_html=True)
-            # Store for AI trade advisor context
             st.session_state[f"last_news_{symbol}"] = news
-
-        # AI analysis button
-        ai_key = f"ai_{symbol}_{interval}"
-        if st.button(f"🤖 AI Analysis", key=f"ai_btn_{symbol}"):
-            with st.spinner("Asking Grok..."):
-                news_d = st.session_state.get(f"news_{symbol}")
-                st.session_state[ai_key] = get_ai_analysis(
-                    symbol, a["direction"], a["score"], a["grade"],
-                    price, a["sl"], a["tp1"], a["tp2"],
-                    a["atr"], a["rsi"], a["macd_hist"], a["session"],
-                    news_d, a["df"].tail(10))
-        if ai_key in st.session_state:
-            st.markdown(f"<div class='ai-bubble'><div class='ai-header'>◈ GROK ANALYSIS</div>{st.session_state[ai_key]}</div>", unsafe_allow_html=True)
 
     with col_r:
         render_trade_tracker(symbol, price, a, td_key)
@@ -3940,43 +3952,8 @@ def page_backtest():
         ).round(2).reset_index()
         st.dataframe(rsi2, use_container_width=True, hide_index=True)
 
-    # ── Grok AI Backtest Analysis ────────────────────────────
+    # ── AI Backtest Analysis Removed ────────────────────────────
     st.markdown("---")
-    if st.button("🤖 AI Backtest Analysis (Grok)", key="btn_bt_ai"):
-        key = get_xai_key()
-        if not key:
-            st.error("No xAI key.")
-        else:
-            bt_summary = (
-                f"BACKTEST RESULTS — {bt_sym} {bt_int} ({bt_bars} bars)\n"
-                f"Total trades: {total} | Win rate: {wr:.1f}% | Avg R: {avg_r:+.2f} | Total R: {total_r:+.2f}\n"
-                f"Profit Factor: {pf:.2f} | Max Drawdown: {max_dd:.1f}R\n"
-                f"Max Win Streak: {max_w} | Max Loss Streak: {max_l}\n"
-                f"Asset class: {c_.get('asset_class','forex')}\n\n"
-                f"BY GRADE:\n{gd2.to_string(index=False)}\n\n"
-                f"BY DIRECTION:\n{dd2.to_string(index=False)}\n\n"
-                f"Analyze this backtest:\n"
-                f"1. Is this strategy profitable? Is the edge statistically significant?\n"
-                f"2. What's the biggest weakness?\n"
-                f"3. Should I trade this symbol/timeframe with real money?\n"
-                f"4. Specific parameter adjustments to improve results?\n"
-                f"5. Compare to my live trading performance if data is available.\n"
-                f"Be brutally honest."
-            )
-            with st.spinner("Grok analyzing backtest…"):
-                bt_ai = _grok([
-                    {"role":"system","content":"You are a quantitative trading analyst reviewing backtest results. Be data-driven and honest."},
-                    {"role":"user","content":bt_summary}
-                ], max_tokens=600, temperature=0.3, api_key=key) or "No response."
-            st.session_state["bt_ai_analysis"] = bt_ai
-
-    if st.session_state.get("bt_ai_analysis"):
-        st.markdown(
-            f"<div class='ai-bubble'>"
-            f"<div style='font-size:10px;color:#6366f1;font-family:Space Mono,monospace;"
-            f"letter-spacing:.08em;margin-bottom:8px;'>🤖 GROK BACKTEST ANALYSIS</div>"
-            + st.session_state["bt_ai_analysis"].replace("\n","<br>") +
-            f"</div>", unsafe_allow_html=True)
 
 # ============================================================
 # SIDEBAR
@@ -4111,50 +4088,8 @@ def page_performance():
         show_cols = [c for c in cols if c in df.columns]
         st.dataframe(df[show_cols].head(20), use_container_width=True, hide_index=True)
 
-        # ── AI Habit Analysis ─────────────────────────────────
+        # ── AI Habit Analysis Removed ─────────────────────────────
         st.markdown("---")
-        st.markdown("<div class='mono-title'>🤖 AI HABIT ANALYSIS</div>", unsafe_allow_html=True)
-
-        if st.button("🤖 Analyze My Trading Habits (Grok)", key="btn_habit"):
-            key = get_xai_key()
-            if not key:
-                st.error("No xAI key configured.")
-            else:
-                # Build summary for Grok
-                by_sym  = sym_stats.to_string(index=False)
-                by_dir  = df.groupby("direction")["pnl_r"].agg(["count","mean","sum"]).round(2).to_string()
-                by_out  = df["outcome"].value_counts().to_string()
-                top3_w  = df[df["outcome"]=="WIN"].nlargest(3,"pnl_r")[["symbol","direction","pnl_r","grade"]].to_string(index=False)
-                top3_l  = df[df["outcome"]=="LOSS"].nsmallest(3,"pnl_r")[["symbol","direction","pnl_r","grade"]].to_string(index=False)
-                msg = (
-                    f"FOREX TRADER PERFORMANCE REVIEW\n"
-                    f"Total trades: {total} | Win rate: {wr}% | Avg R: {avg_r} | Total R: {total_r}\n\n"
-                    f"BY SYMBOL:\n{by_sym}\n\n"
-                    f"BY DIRECTION:\n{by_dir}\n\n"
-                    f"OUTCOMES:\n{by_out}\n\n"
-                    f"TOP 3 WINS:\n{top3_w}\n\n"
-                    f"TOP 3 LOSSES:\n{top3_l}\n\n"
-                    f"Please analyze this trader's habits and provide:\n"
-                    f"1. STRENGTHS: What they're doing well\n"
-                    f"2. WEAKNESSES: Patterns in their losses\n"
-                    f"3. BEST SETUP: Which symbol/direction/session works best for them\n"
-                    f"4. ADVICE: 3 specific actionable improvements\n"
-                    f"Be direct and specific. Use the data to back up every point."
-                )
-                with st.spinner("Grok is analyzing your trading habits…"):
-                    analysis = _grok([
-                        {"role":"system","content":"You are an elite forex trading coach analyzing a student's real trade history. UTC: "+pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M")},
-                        {"role":"user","content":msg}
-                    ], max_tokens=600, temperature=0.3, api_key=key) or "No response."
-                st.session_state["habit_analysis"] = analysis
-
-        if st.session_state.get("habit_analysis"):
-            st.markdown(
-                f"<div class='ai-bubble'>"
-                f"<div style='font-size:10px;color:#6366f1;font-family:Space Mono,monospace;"
-                f"letter-spacing:.08em;margin-bottom:8px;'>🤖 GROK HABIT ANALYSIS</div>"
-                + st.session_state["habit_analysis"].replace("\n","<br>") +
-                f"</div>", unsafe_allow_html=True)
 
     # ── Signal history ────────────────────────────────────────
     if signals:
@@ -4184,93 +4119,25 @@ def page_weekend():
                 "Analyze upcoming economic events and weekend news to prepare for Monday's open.</div>",
                 unsafe_allow_html=True)
 
-    # Fetch economic calendar for all symbols
+    # Pre-market analysis via Trading Economics calendar only
     te_key = get_te_key()
-
-    if st.button("🔮 Generate Pre-Market Analysis (Grok)", key="btn_premarket"):
-        key = get_xai_key()
-        if not key:
-            st.error("No xAI key configured.")
-            return
-
-        # Gather economic calendar data if available
-        cal_text = ""
-        if te_key:
-            events = fetch_te_calendar(te_key)
-            if events:
-                ev_lines = []
-                for e in events[:20]:
-                    imp_icon = "HIGH" if e["importance"]=="HIGH" else e["importance"]
-                    ev_lines.append(f"  {e['date'].strftime('%a %d %H:%M UTC')} [{e['country'].title()}] "
-                                    f"[{imp_icon}] {e['event']}")
-                cal_text = "\n".join(ev_lines)
-
-        # Build prompt for Grok
-        now_utc = pd.Timestamp.utcnow()
-        symbols_list = ", ".join(ACTIVE_SYMBOLS)
-
-        msg = (
-            f"WEEKEND PRE-MARKET ANALYSIS — Prepare for Monday's open\n"
-            f"Current time: {now_utc.strftime('%Y-%m-%d %H:%M UTC')} ({now_utc.strftime('%A')})\n"
-            f"Symbols I trade: {symbols_list}\n\n"
-        )
-        if cal_text:
-            msg += f"UPCOMING ECONOMIC CALENDAR (next 3 days):\n{cal_text}\n\n"
-
-        # Add historical context if available
-        hist_summary = ""
-        if _sb_ok():
-            journal = sb_get("journal", "order=closed_at.desc&limit=50")
-            if journal:
-                df_j = pd.DataFrame(journal)
-                df_j["pnl_r"] = pd.to_numeric(df_j["pnl_r"], errors="coerce").fillna(0)
-                by_sym = df_j.groupby("symbol").agg(
-                    trades=("pnl_r","count"),
-                    wr=("outcome", lambda x: f"{(x=='WIN').sum()}/{len(x)}"),
-                    avg_r=("pnl_r","mean")
-                ).round(2)
-                hist_summary = f"\nMY RECENT PERFORMANCE (last 50 trades):\n{by_sym.to_string()}\n"
-
-        msg += hist_summary
-        msg += (
-            f"\nPlease provide:\n"
-            f"1. MARKET OUTLOOK: Key themes driving markets this week (USD strength/weakness, "
-            f"risk sentiment, central bank expectations)\n"
-            f"2. HIGH-IMPACT EVENTS: Which economic events to watch and their expected impact "
-            f"on my symbols (with exact event times)\n"
-            f"3. SYMBOL-BY-SYMBOL BIAS: For each of my symbols, give a BULLISH/BEARISH/NEUTRAL "
-            f"bias with 1-sentence reasoning\n"
-            f"4. TRADE PLAN: Top 3 symbols + directions to watch for. Explain the setup "
-            f"and catalyst — do NOT include specific price levels (our system calculates "
-            f"Entry/SL/TP automatically from live data)\n"
-            f"5. RISK WARNINGS: Any major risks or events that could cause unexpected moves\n"
-            f"6. PERSONAL ADVICE: Based on my recent performance data, which symbols and "
-            f"directions should I focus on or avoid?\n\n"
-            f"IMPORTANT: Do NOT provide specific price numbers for entry, SL, TP, or support/resistance. "
-            f"You do not have access to live prices and your price data is outdated. "
-            f"Focus on DIRECTION, EVENTS, TIMING, and RISK only. Our system handles price levels."
-        )
-
-        with st.spinner("🔮 Grok is analyzing weekend news and upcoming events…"):
-            analysis = _grok([
-                {"role":"system","content":
-                 "You are an elite forex market analyst preparing a weekly pre-market brief. "
-                 "Use the trader's personal performance data to give personalised recommendations. "
-                 "CRITICAL: Never output specific price levels (entry, SL, TP, support, resistance) — "
-                 "you do not have live price access and your data is outdated. "
-                 "Focus on direction, events, timing, catalysts, and risk. "
-                 f"UTC: {now_utc.strftime('%Y-%m-%d %H:%M')}"},
-                {"role":"user","content":msg}
-            ], max_tokens=1200, temperature=0.3, api_key=key) or "No response."
-        st.session_state["premarket_analysis"] = analysis
-
-    if st.session_state.get("premarket_analysis"):
-        st.markdown(
-            f"<div class='ai-bubble'>"
-            f"<div style='font-size:10px;color:#6366f1;font-family:Space Mono,monospace;"
-            f"letter-spacing:.08em;margin-bottom:8px;'>🔮 GROK PRE-MARKET BRIEF</div>"
-            + st.session_state["premarket_analysis"].replace("\n","<br>") +
-            f"</div>", unsafe_allow_html=True)
+    if te_key:
+        if st.button("📅 Load Economic Calendar", key="btn_te_calendar"):
+            with st.spinner("Fetching Trading Economics calendar…"):
+                events = fetch_te_calendar(te_key)
+                if events:
+                    cal_lines = []
+                    for e in events[:30]:
+                        imp_icon = "HIGH" if e["importance"]=="HIGH" else e["importance"]
+                        cal_lines.append({
+                            "Time": e['date'].strftime('%a %d %H:%M UTC'),
+                            "Country": e['country'].title(),
+                            "Importance": imp_icon,
+                            "Event": e['event']
+                        })
+                    st.dataframe(pd.DataFrame(cal_lines), use_container_width=True, hide_index=True)
+    else:
+        st.info("Add Trading Economics key in sidebar to view economic calendar")
 
     # Economic calendar display
     if te_key:
@@ -4342,22 +4209,14 @@ def render_sidebar():
                                 type="password", key="td_inp", placeholder="paste key…")
             if _td: st.session_state["td_key"] = _td
 
-            # xAI Grok
-            _xai = st.text_input("xAI Grok", value=st.session_state.get("xai_key",_ENV_XAI),
-                                 type="password", key="xai_inp", placeholder="paste key…")
-            if _xai: st.session_state["xai_key"] = _xai
-
-            _gm = st.selectbox("Grok Model", _GROK_MODELS, index=0, key="grok_model_sel")
-
             # Trading Economics
             _te = st.text_input("Trading Economics", value=st.session_state.get("te_key",_ENV_TE),
                                 type="password", key="te_inp", placeholder="paste TE key…")
             if _te: st.session_state["te_key"] = _te
 
             td_ok  = "✅" if get_td_key()  else "❌"
-            xai_ok = "✅" if get_xai_key() else "❌"
             te_ok  = "✅" if get_te_key()  else "❌"
-            st.markdown(f"<div style='font-size:11px;color:#4a5568;font-family:Space Mono,monospace;'>{td_ok} TD &nbsp; {xai_ok} xAI ({_gm[:14]}) &nbsp; {te_ok} TE</div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='font-size:11px;color:#4a5568;font-family:Space Mono,monospace;'>{td_ok} TD &nbsp; {te_ok} TE</div>", unsafe_allow_html=True)
 
         st.markdown("---")
         st.markdown("<div style='font-size:11px;color:#00d4aa;font-family:Space Mono,monospace;margin-bottom:4px;'>MT5 LIVE (MetaApi)</div>", unsafe_allow_html=True)
