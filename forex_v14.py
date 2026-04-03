@@ -1,5 +1,5 @@
 """
-ALPHA EDGE AI TERMINAL  v15.0  (Hybrid Engine V3)
+ALPHA EDGE AI TERMINAL  v16.0  (S/D Gate Engine + CHoCH Alerts)
 Stable direction (H4-first), anti-chase, regime-aware scoring
 ADX regime detection, pullback-quality scoring, no grade inflation
 Auth: Supabase Auth for multi-user, per-user MT5 & trade data
@@ -95,7 +95,7 @@ html,body,[data-testid="stAppViewContainer"]{background:#080c10!important;color:
 # ============================================================
 # CONSTANTS
 # ============================================================
-APP_VERSION = "V14.0"
+APP_VERSION = "V16.0"
 
 # ── Signal alert via browser (sound + notification) ──────────
 _SIGNAL_ALERT_JS = """
@@ -162,6 +162,64 @@ def fire_tp_alert(symbol, tp_label, tp_price, tp2_price=None):
     if tp2_price:
         body += f" @ {tp2_price}"
     _fire_browser_alert(f"🎯 {tp_label} HIT — {symbol}", body, beeps=2)
+
+# ── CRITICAL: Structure Break / CHoCH Alert (urgent, loud) ────
+_CHOCH_ALERT_JS = """
+<script>
+(function() {
+  // ── URGENT alarm: loud repeating siren ──
+  var ctx = new (window.AudioContext || window.webkitAudioContext)();
+  var t = ctx.currentTime;
+  for (var i = 0; i < 6; i++) {
+    var osc = ctx.createOscillator();
+    var gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.frequency.value = i % 2 === 0 ? 1200 : 800;
+    osc.type = "square";
+    gain.gain.setValueAtTime(0.5, t + i*0.25);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + i*0.25 + 0.2);
+    osc.start(t + i*0.25);
+    osc.stop(t + i*0.25 + 0.25);
+  }
+  // ── Browser notification (persistent) ──
+  if ("Notification" in window) {
+    if (Notification.permission === "granted") {
+      new Notification("ALERT_TITLE", {body: "ALERT_BODY", icon: "", requireInteraction: true});
+    } else if (Notification.permission !== "denied") {
+      Notification.requestPermission().then(function(p) {
+        if (p === "granted") new Notification("ALERT_TITLE", {body: "ALERT_BODY", requireInteraction: true});
+      });
+    }
+  }
+})();
+</script>
+"""
+
+def fire_choch_alert(symbol, direction, details=""):
+    """URGENT alert: CHoCH detected — structure changed, EXIT NOW."""
+    title = f"🚨 CHoCH — {symbol} STRUCTURE BREAK"
+    body = f"Change of Character! {direction} structure broken. {details}"
+    js = (_CHOCH_ALERT_JS
+          .replace("ALERT_TITLE", title)
+          .replace("ALERT_BODY", body))
+    stc.html(js, height=0)
+
+def fire_bos_exit_alert(symbol, direction, level):
+    """URGENT alert: BOS against your position — EXIT."""
+    title = f"⚠️ BOS EXIT — {symbol}"
+    body = f"Break of Structure against {direction}. Level: {level:.2f}. EXIT NOW!"
+    js = (_CHOCH_ALERT_JS
+          .replace("ALERT_TITLE", title)
+          .replace("ALERT_BODY", body))
+    stc.html(js, height=0)
+
+def fire_zone_midpoint_alert(symbol, zone_type, direction):
+    """Alert: price broke through 50% midpoint of S/D zone — weakening."""
+    _fire_browser_alert(
+        f"⚠️ ZONE 50% BREAK — {symbol}",
+        f"Price broke {zone_type} zone midpoint against {direction}. Structure weakening!",
+        beeps=4
+    )
 
 def get_historical_context(symbol: str, direction: str, min_trades: int = 5) -> str:
     """
@@ -2608,6 +2666,629 @@ def gold_engine_score(df, df_h4, df_h1, direction, base_score, base_grade, bar_t
 
     return adjusted_score, gold_info, adjusted_grade, extra_warns
 
+# ============================================================
+# GOLD ENGINE V5 — GATE-BASED SYSTEM
+# The Trade Academy Method: Supply/Demand FIRST → Structure → Entry
+# H4 (bias) → H1 (zones) → M15 (structure confirm) → M5 (entry trigger)
+# CORE PHILOSOPHY: If ANY gate fails → NO TRADE.
+# ============================================================
+
+def _gold_v5_h4_bias(df_h4):
+    """GATE 1: H4 Bias. Returns direction/strength/trend/details."""
+    if df_h4 is None or len(df_h4) < 50:
+        return {"direction": "Wait", "strength": "weak", "trend": "neutral",
+                "details": "Insufficient H4 data"}
+    row = df_h4.iloc[-1]
+    close = float(row["close"])
+    e20 = float(row.get("ema20", close))
+    e50 = float(row.get("ema50", close))
+    e200 = float(row.get("ema200", close))
+    data = df_h4.tail(80)
+    swing_highs = []; swing_lows = []
+    for i in range(2, len(data) - 2):
+        r = data.iloc[i]; h = float(r["high"]); l = float(r["low"])
+        if (h >= float(data.iloc[i-1]["high"]) and h >= float(data.iloc[i-2]["high"]) and
+            h >= float(data.iloc[i+1]["high"]) and h >= float(data.iloc[i+2]["high"])):
+            swing_highs.append(h)
+        if (l <= float(data.iloc[i-1]["low"]) and l <= float(data.iloc[i-2]["low"]) and
+            l <= float(data.iloc[i+1]["low"]) and l <= float(data.iloc[i+2]["low"])):
+            swing_lows.append(l)
+    sb = False; sbe = False
+    if len(swing_highs) >= 2 and len(swing_lows) >= 2:
+        sb = swing_highs[-1] > swing_highs[-2] and swing_lows[-1] > swing_lows[-2]
+        sbe = swing_highs[-1] < swing_highs[-2] and swing_lows[-1] < swing_lows[-2]
+    eb = e20 > e50 > e200 and close > e200
+    ebe = e20 < e50 < e200 and close < e200
+    ebw = close > e50 and e20 > e50
+    ebew = close < e50 and e20 < e50
+    if sb and eb: return {"direction":"Buy","strength":"strong","trend":"bull","details":"H4 HH/HL + EMA stacked bullish"}
+    if sb and ebw: return {"direction":"Buy","strength":"moderate","trend":"bull_weak","details":"H4 HH/HL + partial EMA"}
+    if sbe and ebe: return {"direction":"Sell","strength":"strong","trend":"bear","details":"H4 LH/LL + EMA stacked bearish"}
+    if sbe and ebew: return {"direction":"Sell","strength":"moderate","trend":"bear_weak","details":"H4 LH/LL + partial EMA"}
+    if sb: return {"direction":"Buy","strength":"weak","trend":"bull_struct","details":"H4 structure bullish, EMAs not aligned"}
+    if sbe: return {"direction":"Sell","strength":"weak","trend":"bear_struct","details":"H4 structure bearish, EMAs not aligned"}
+    if eb: return {"direction":"Buy","strength":"weak","trend":"bull_ema","details":"EMAs bullish, structure unclear"}
+    if ebe: return {"direction":"Sell","strength":"weak","trend":"bear_ema","details":"EMAs bearish, structure unclear"}
+    return {"direction":"Wait","strength":"weak","trend":"neutral","details":"No clear H4 bias — stay flat"}
+
+def _gold_v5_zone_detection(df_h1, lookback=120):
+    """Enhanced S/D zone detection on H1 with quality scoring."""
+    zones = {"supply": [], "demand": []}
+    if df_h1 is None or len(df_h1) < min(lookback, 30):
+        return zones
+    data = df_h1.tail(min(lookback, len(df_h1)))
+    atr = float(data.iloc[-1].get("atr14", 1.0) or 1.0)
+    if atr <= 0: atr = 1.0
+    imp_th = atr * 1.5
+    zone_list = []
+    for i in range(2, len(data) - 1):
+        curr = data.iloc[i]; prev = data.iloc[i-1]
+        body = abs(float(curr["close"]) - float(curr["open"]))
+        if body < imp_th: continue
+        base_c = sum(1 for k in range(max(0,i-3),i) if abs(float(data.iloc[k]["close"])-float(data.iloc[k]["open"])) < atr*0.7)
+        has_base = base_c >= 1
+        if float(curr["close"]) < float(curr["open"]):  # bearish → supply
+            zh = max(float(prev["high"]), float(curr["high"]))
+            zl = float(curr["open"])
+            if has_base:
+                for k in range(max(0,i-2),i):
+                    zh = max(zh, float(data.iloc[k]["high"])); zl = min(zl, float(data.iloc[k]["low"]))
+            zone_list.append({"type":"supply","high":zh,"low":zl,"impulse_strength":body/atr,"has_base":has_base,"bar_idx":i,"age_bars":len(data)-1-i})
+        elif float(curr["close"]) > float(curr["open"]):  # bullish → demand
+            zl = min(float(prev["low"]), float(curr["low"]))
+            zh = float(curr["open"])
+            if has_base:
+                for k in range(max(0,i-2),i):
+                    zl = min(zl, float(data.iloc[k]["low"])); zh = max(zh, float(data.iloc[k]["high"]))
+            zone_list.append({"type":"demand","high":zh,"low":zl,"impulse_strength":body/atr,"has_base":has_base,"bar_idx":i,"age_bars":len(data)-1-i})
+    close = float(data.iloc[-1]["close"])
+    margin = atr * 0.3
+    for z in zone_list:
+        visits = sum(1 for j in range(z["bar_idx"]+2, len(data))
+                     if float(data.iloc[j]["low"]) <= z["high"]+margin and float(data.iloc[j]["high"]) >= z["low"]-margin)
+        z["visits"] = visits; z["fresh"] = visits == 0; z["first_visit"] = visits == 1
+        q = min(30, int(z["impulse_strength"]*10))
+        q += 30 if z["fresh"] else (15 if z["first_visit"] else (5 if visits==2 else 0))
+        q += 20 if z["has_base"] else 0
+        q += max(0, 20 - z["age_bars"]//5)
+        z["quality"] = min(100, q)
+        # ── 50% Midpoint (Equilibrium Level) ──
+        z["midpoint"] = (z["high"] + z["low"]) / 2
+        # Check if price broke through midpoint (structure weakening signal)
+        if z["type"] == "demand":
+            z["midpoint_broken"] = close < z["midpoint"]  # price below demand midpoint = weakening
+        else:
+            z["midpoint_broken"] = close > z["midpoint"]  # price above supply midpoint = weakening
+        if close > z["high"]: z["distance_atr"] = (close - z["high"]) / atr
+        elif close < z["low"]: z["distance_atr"] = (z["low"] - close) / atr
+        else: z["distance_atr"] = 0
+    zone_list = [z for z in zone_list if z["visits"] < 3]
+    for z in zone_list:
+        zones[z["type"]].append(z)
+    zones["supply"] = sorted(zones["supply"], key=lambda z: -z["quality"])[:5]
+    zones["demand"] = sorted(zones["demand"], key=lambda z: -z["quality"])[:5]
+    return zones
+
+def _gold_v5_zone_check(close, zones, atr, direction):
+    """GATE 2: Price at/approaching valid zone?"""
+    ttype = "demand" if direction == "Buy" else "supply"
+    tzones = zones.get(ttype, [])
+    if not tzones:
+        return {"passed":False,"status":"no_zone","zone":None,"distance_atr":999,"quality":0,
+                "details":f"No {ttype} zones found on H1"}
+    margin = atr * 0.5; approach = atr * 3
+    best_z = None; best_st = "no_zone"; best_d = 999
+    for z in tzones:
+        if z["low"]-margin <= close <= z["high"]+margin:
+            if best_st != "at_zone" or z["quality"] > (best_z["quality"] if best_z else 0):
+                best_z = z; best_st = "at_zone"; best_d = 0
+        elif direction=="Buy" and close > z["high"]:
+            d = close - z["high"]
+            if d < approach and best_st != "at_zone" and d < best_d:
+                best_z = z; best_st = "approaching"; best_d = d/atr
+        elif direction=="Sell" and close < z["low"]:
+            d = z["low"] - close
+            if d < approach and best_st != "at_zone" and d < best_d:
+                best_z = z; best_st = "approaching"; best_d = d/atr
+    if best_z is None:
+        nearest = min(tzones, key=lambda z: z["distance_atr"])
+        return {"passed":False,"status":"no_zone","zone":nearest,"distance_atr":nearest["distance_atr"],
+                "quality":nearest["quality"],"details":f"Nearest {ttype} zone {nearest['distance_atr']:.1f} ATR away"}
+    fr = "FRESH" if best_z["fresh"] else ("1st REVISIT" if best_z["first_visit"] else f"{best_z['visits']}x visited")
+    if best_st == "at_zone":
+        return {"passed":True,"status":"at_zone","zone":best_z,"distance_atr":0,
+                "quality":best_z["quality"],"details":f"Price IN {ttype.upper()} zone ({fr}, Q:{best_z['quality']})"}
+    return {"passed":False,"status":"approaching","zone":best_z,"distance_atr":best_d,
+            "quality":best_z["quality"],"details":f"Approaching {ttype.upper()} zone ({fr}, {best_d:.1f} ATR away)"}
+
+def _gold_v5_m15_confirm(df_m15, direction, zone):
+    """GATE 3: M15 BOS/CHoCH confirming reaction off zone."""
+    if df_m15 is None or len(df_m15) < 30:
+        return {"passed":False,"signal":None,"bos_data":{},"choch_data":{},"swing_high":0,"swing_low":0,
+                "details":"Insufficient M15 data"}
+    data = df_m15.tail(50); close = float(data.iloc[-1]["close"])
+    shs = []; sls = []
+    for i in range(1, len(data)-1):
+        h = float(data.iloc[i]["high"]); l = float(data.iloc[i]["low"])
+        if h > float(data.iloc[i-1]["high"]) and h > float(data.iloc[i+1]["high"]): shs.append(h)
+        if l < float(data.iloc[i-1]["low"]) and l < float(data.iloc[i+1]["low"]): sls.append(l)
+    bos_bull = len(shs) >= 2 and close > shs[-1]
+    bos_bear = len(sls) >= 2 and close < sls[-1]
+    bos_data = {"bullish_bos":bos_bull,"bearish_bos":bos_bear,
+                "last_bos_dir":"bullish" if bos_bull else ("bearish" if bos_bear else None)}
+    choch_bull = len(sls) >= 2 and len(shs) >= 1 and sls[-1] < sls[-2] and close > shs[-1]
+    choch_bear = len(shs) >= 2 and len(sls) >= 1 and shs[-1] > shs[-2] and close < sls[-1]
+    choch_data = {"bullish_choch":choch_bull,"bearish_choch":choch_bear,
+                  "direction":"bullish" if choch_bull else ("bearish" if choch_bear else None)}
+    confirmed = False; signal = None; details = "Waiting for M15 structure confirmation"
+    if direction == "Buy":
+        if choch_bull: confirmed=True; signal="choch"; details="M15 Bullish CHoCH — structure shift"
+        elif bos_bull: confirmed=True; signal="bos"; details="M15 Bullish BOS — broke swing high"
+        if bos_bear and not confirmed: details = "⚠ M15 Bearish BOS — structure breaking DOWN"
+    elif direction == "Sell":
+        if choch_bear: confirmed=True; signal="choch"; details="M15 Bearish CHoCH — structure shift"
+        elif bos_bear: confirmed=True; signal="bos"; details="M15 Bearish BOS — broke swing low"
+        if bos_bull and not confirmed: details = "⚠ M15 Bullish BOS — structure breaking UP"
+    return {"passed":confirmed,"signal":signal,"bos_data":bos_data,"choch_data":choch_data,
+            "swing_high":shs[-1] if shs else 0,"swing_low":sls[-1] if sls else 0,"details":details}
+
+def _gold_v5_m5_trigger(df_m5, direction, zone, atr):
+    """GATE 4: M5 candle entry trigger."""
+    if df_m5 is None or len(df_m5) < 10:
+        return {"passed":False,"type":None,"entry_price":0,"details":"Insufficient M5 data","ob_present":False}
+    data = df_m5.tail(20); close = float(data.iloc[-1]["close"])
+    c = data.iloc[-1]; p = data.iloc[-2]
+    co=float(c["open"]); cc=float(c["close"]); ch=float(c["high"]); cl=float(c["low"])
+    cb=abs(cc-co); cr=max(ch-cl, 0.01); br=cb/cr
+    po=float(p["open"]); pc=float(p["close"]); pb=abs(pc-po)
+    triggered=False; tt=None; details="Waiting for M5 entry candle"
+    if direction=="Buy":
+        if cc>co and pc<po and cb>pb and cc>po: triggered=True; tt="engulfing"; details="M5 Bullish Engulfing"
+        lw=min(cc,co)-cl; uw=ch-max(cc,co)
+        if lw>cb*2 and uw<cb*0.5 and cc>co: triggered=True; tt="pin_bar"; details="M5 Bullish Pin Bar"
+        if cc>co and br>0.7 and cb>atr*0.3: triggered=True; tt="momentum"; details="M5 Bullish Momentum"
+    elif direction=="Sell":
+        if cc<co and pc>po and cb>pb and cc<po: triggered=True; tt="engulfing"; details="M5 Bearish Engulfing"
+        uw=ch-max(cc,co); lw=min(cc,co)-cl
+        if uw>cb*2 and lw<cb*0.5 and cc<co: triggered=True; tt="pin_bar"; details="M5 Bearish Pin Bar"
+        if cc<co and br>0.7 and cb>atr*0.3: triggered=True; tt="momentum"; details="M5 Bearish Momentum"
+    ob_present = False
+    if zone and atr > 0:
+        for i in range(max(0,len(data)-10), len(data)-1):
+            b=data.iloc[i]; bb=abs(float(b["close"])-float(b["open"]))
+            if bb>atr*0.5:
+                bl=min(float(b["close"]),float(b["open"])); bh=max(float(b["close"]),float(b["open"]))
+                if bl-atr*0.3<=close<=bh+atr*0.3: ob_present=True; break
+    return {"passed":triggered,"type":tt,"entry_price":close,"details":details,"ob_present":ob_present}
+
+def _gold_v5_entry_levels(close, direction, zone, atr, zones, df_m15):
+    """Zone-based SL/TP: SL at zone edge, TP at opposing zone or R:R."""
+    if zone is None:
+        m = 1 if direction=="Buy" else -1
+        sl = round(close - m*atr*2, 2)
+        return {"sl":sl,"tp1":round(close+m*atr*3,2),"tp2":round(close+m*atr*5,2),
+                "sl_pips":round(abs(close-sl)/0.1,1),"rr1":1.5,"rr2":2.5,"sl_type":"ATR fallback","tp_type":"ATR fallback"}
+    buf = atr * 0.5
+    if direction == "Buy":
+        sl = round(zone["low"] - buf, 2); sl_d = close - sl
+        tp1 = round(close + sl_d*2, 2); tp_type = "2:1 R:R"
+        for sz in sorted(zones.get("supply",[]), key=lambda z: z["low"]):
+            if sz["low"] > close + sl_d: tp1 = round(sz["low"], 2); tp_type = "Supply Zone"; break
+        tp2 = round(close + sl_d*3, 2)
+        if df_m15 is not None and len(df_m15) >= 20:
+            for i in range(len(df_m15)-3, 1, -1):
+                h=float(df_m15.iloc[i]["high"])
+                if i+1<len(df_m15) and h>float(df_m15.iloc[i-1]["high"]) and h>float(df_m15.iloc[i+1]["high"]) and h>close+sl_d*1.5:
+                    tp2=round(h,2); break
+    else:
+        sl = round(zone["high"] + buf, 2); sl_d = sl - close
+        tp1 = round(close - sl_d*2, 2); tp_type = "2:1 R:R"
+        for dz in sorted(zones.get("demand",[]), key=lambda z: -z["high"]):
+            if dz["high"] < close - sl_d: tp1 = round(dz["high"], 2); tp_type = "Demand Zone"; break
+        tp2 = round(close - sl_d*3, 2)
+        if df_m15 is not None and len(df_m15) >= 20:
+            for i in range(len(df_m15)-3, 1, -1):
+                l=float(df_m15.iloc[i]["low"])
+                if i+1<len(df_m15) and l<float(df_m15.iloc[i-1]["low"]) and l<float(df_m15.iloc[i+1]["low"]) and l<close-sl_d*1.5:
+                    tp2=round(l,2); break
+    sp = abs(close-sl)/0.1
+    rr1 = abs(tp1-close)/max(abs(close-sl),0.01)
+    rr2 = abs(tp2-close)/max(abs(close-sl),0.01)
+    return {"sl":sl,"tp1":tp1,"tp2":tp2,"sl_pips":round(sp,1),"rr1":round(rr1,1),"rr2":round(rr2,1),
+            "sl_type":f"Zone edge + {buf:.1f}","tp_type":tp_type}
+
+def _gold_v5_exit_check(df_m15, direction):
+    """Check M15 BOS against position → EXIT or TRAIL."""
+    if df_m15 is None or len(df_m15) < 20:
+        return {"exit_now":False,"trail_sl":False,"trail_level":0,"details":"No exit data"}
+    data = df_m15.tail(30); close = float(data.iloc[-1]["close"])
+    shs = []; sls = []
+    for i in range(1, len(data)-1):
+        h=float(data.iloc[i]["high"]); l=float(data.iloc[i]["low"])
+        if h>float(data.iloc[i-1]["high"]) and h>float(data.iloc[i+1]["high"]): shs.append(h)
+        if l<float(data.iloc[i-1]["low"]) and l<float(data.iloc[i+1]["low"]): sls.append(l)
+    if direction=="Buy":
+        if sls and close < sls[-1]:
+            return {"exit_now":True,"trail_sl":False,"trail_level":0,
+                    "details":f"M15 Bearish BOS — {close:.2f} < SL {sls[-1]:.2f} → EXIT"}
+        if len(sls)>=2 and sls[-1]>sls[-2]:
+            return {"exit_now":False,"trail_sl":True,"trail_level":sls[-1],
+                    "details":f"Higher lows → trail SL to {sls[-1]:.2f}"}
+    elif direction=="Sell":
+        if shs and close > shs[-1]:
+            return {"exit_now":True,"trail_sl":False,"trail_level":0,
+                    "details":f"M15 Bullish BOS — {close:.2f} > SH {shs[-1]:.2f} → EXIT"}
+        if len(shs)>=2 and shs[-1]<shs[-2]:
+            return {"exit_now":False,"trail_sl":True,"trail_level":shs[-1],
+                    "details":f"Lower highs → trail SL to {shs[-1]:.2f}"}
+    return {"exit_now":False,"trail_sl":False,"trail_level":0,"details":"Hold — no exit signal"}
+
+def _gold_v5_confluence(df, direction, zone, atr, bar_time=None):
+    """Count extra confluences (FVG, sweep, divergence, killzone, round num, fib, BB squeeze)."""
+    items = []; close = float(df.iloc[-1]["close"]) if len(df)>0 else 0
+    # FVG
+    fvg = {"detected":False,"type":None,"level":0}
+    if len(df) >= 20:
+        d = df.tail(30)
+        for i in range(len(d)-1, max(1,len(d)-15), -1):
+            if i < 2: break
+            gb = float(d.iloc[i]["low"]) - float(d.iloc[i-2]["high"])
+            gbe = float(d.iloc[i-2]["low"]) - float(d.iloc[i]["high"])
+            if gb > 0 and direction=="Buy":
+                mid=(float(d.iloc[i]["low"])+float(d.iloc[i-2]["high"]))/2
+                if abs(close-mid)<atr*1.5: fvg={"detected":True,"type":"bullish_fvg","level":mid}; items.append("FVG"); break
+            elif gbe > 0 and direction=="Sell":
+                mid=(float(d.iloc[i-2]["low"])+float(d.iloc[i]["high"]))/2
+                if abs(close-mid)<atr*1.5: fvg={"detected":True,"type":"bearish_fvg","level":mid}; items.append("FVG"); break
+    # Liquidity Sweep
+    sweep = {"detected":False,"direction":None,"sweep_level":0}
+    if len(df) >= 35:
+        rec=df.iloc[-35:-5]; l5=df.iloc[-5:]
+        rh=float(rec["high"].max()); rl=float(rec["low"].min())
+        lh=float(l5["high"].max()); ll=float(l5["low"].min())
+        if lh>rh+atr*0.5 and close<rh and direction=="Sell":
+            sweep={"detected":True,"direction":"bear","sweep_level":rh}; items.append("Liquidity Sweep")
+        elif ll<rl-atr*0.5 and close>rl and direction=="Buy":
+            sweep={"detected":True,"direction":"bull","sweep_level":rl}; items.append("Liquidity Sweep")
+    # RSI Divergence
+    rsi_div = {"detected":False,"type":None,"hidden":False}
+    if len(df) >= 25:
+        d = df.tail(25); sh=[]; sl_d=[]
+        for i in range(1, len(d)-1):
+            r=d.iloc[i]; rsi=float(r.get("rsi14",50) or 50)
+            h=float(r["high"]); l=float(r["low"])
+            if h>float(d.iloc[i-1]["high"]) and h>float(d.iloc[i+1]["high"]): sh.append({"p":h,"r":rsi})
+            if l<float(d.iloc[i-1]["low"]) and l<float(d.iloc[i+1]["low"]): sl_d.append({"p":l,"r":rsi})
+        if direction=="Buy" and len(sl_d)>=2:
+            if sl_d[-1]["p"]<sl_d[-2]["p"] and sl_d[-1]["r"]>sl_d[-2]["r"]+3:
+                rsi_div={"detected":True,"type":"bullish_div","hidden":False}; items.append("RSI Divergence")
+            elif sl_d[-1]["p"]>sl_d[-2]["p"] and sl_d[-1]["r"]<sl_d[-2]["r"]-3:
+                rsi_div={"detected":True,"type":"hidden_bull","hidden":True}; items.append("Hidden RSI Div")
+        if direction=="Sell" and len(sh)>=2:
+            if sh[-1]["p"]>sh[-2]["p"] and sh[-1]["r"]<sh[-2]["r"]-3:
+                rsi_div={"detected":True,"type":"bearish_div","hidden":False}; items.append("RSI Divergence")
+            elif sh[-1]["p"]<sh[-2]["p"] and sh[-1]["r"]>sh[-2]["r"]+3:
+                rsi_div={"detected":True,"type":"hidden_bear","hidden":True}; items.append("Hidden RSI Div")
+    # Killzone
+    from datetime import datetime, timezone as tz
+    try: h = pd.Timestamp(bar_time).hour if bar_time else datetime.now(tz.utc).hour
+    except: h = datetime.now(tz.utc).hour
+    kz_name = "Off-hours"; kz_active = False
+    if 7<=h<=8: kz_name="London KZ"; kz_active=True
+    elif 12<=h<=14: kz_name="NY KZ"; kz_active=True
+    elif 15<=h<=16: kz_name="London Close KZ"; kz_active=True
+    elif 9<=h<=11: kz_name="London Session"
+    if kz_active: items.append(f"Killzone ({kz_name})")
+    # Round Number
+    rnd = {"near_round":False,"level":0,"type":None}
+    for step, rt in [(100,"ultra_major"),(50,"major"),(25,"minor")]:
+        nearest = round(close/step)*step
+        if abs(close-nearest) < atr*0.8:
+            rnd={"near_round":True,"level":nearest,"type":rt}; items.append(f"${nearest:.0f} ({rt})"); break
+    # Fib Golden Pocket
+    fib_info = {"golden_pocket":False,"ote":False}
+    if len(df) >= 50:
+        d=df.tail(50); _shs=[]; _sls=[]
+        for i in range(2,len(d)-2):
+            hv=float(d.iloc[i]["high"]); lv=float(d.iloc[i]["low"])
+            if hv>=max(float(d.iloc[i-1]["high"]),float(d.iloc[i+1]["high"]),float(d.iloc[i-2]["high"]),float(d.iloc[i+2]["high"])): _shs.append(hv)
+            if lv<=min(float(d.iloc[i-1]["low"]),float(d.iloc[i+1]["low"]),float(d.iloc[i-2]["low"]),float(d.iloc[i+2]["low"])): _sls.append(lv)
+        if _shs and _sls:
+            _sh=max(_shs[-3:]) if len(_shs)>=3 else _shs[-1]
+            _sl=min(_sls[-3:]) if len(_sls)>=3 else _sls[-1]
+            if _sh > _sl:
+                rng=_sh-_sl
+                if direction=="Buy":
+                    gpt=_sh-rng*0.618; gpb=_sh-rng*0.65; otet=_sh-rng*0.62; oteb=_sh-rng*0.79
+                else:
+                    gpb=_sl+rng*0.618; gpt=_sl+rng*0.65; oteb=_sl+rng*0.62; otet=_sl+rng*0.79
+                if gpb<=close<=gpt: fib_info["golden_pocket"]=True; items.append("Golden Pocket")
+                if oteb<=close<=otet: fib_info["ote"]=True; items.append("OTE Zone")
+    # BB Squeeze
+    bb_sq = {"signal":False,"type":None}
+    if len(df)>=20:
+        cr=df.iloc[-1]; bbu=float(cr.get("bb_upper",0) or 0); bbl=float(cr.get("bb_lower",0) or 0)
+        bbw=bbu-bbl; rv=float(cr.get("rsi14",50) or 50)
+        if bbw>0 and bbw<atr*0.5 and ((direction=="Buy" and rv<35) or (direction=="Sell" and rv>65)):
+            bb_sq={"signal":True,"type":"squeeze_pressure"}; items.append("BB Squeeze")
+    return {"count":len(items),"items":items,"fvg":fvg,"sweep":sweep,"rsi_div":rsi_div,
+            "killzone":kz_name,"kz_active":kz_active,"round_num":rnd,"fib":fib_info,"bb_squeeze":bb_sq}
+
+def gold_engine_v5(df_h4, df_h1, df_m15, df_m5, bar_time=None):
+    """
+    Gold Engine V5 — Gate-Based Analysis.
+    4 Gates: H4 Bias → H1 Zone → M15 Confirm → M5 Trigger.
+    Returns complete analysis with signal, gates, levels, confluence.
+    """
+    atr = 1.0; close = 0
+    for _df in [df_m5, df_m15, df_h1, df_h4]:
+        if _df is not None and len(_df) > 0:
+            atr = float(_df.iloc[-1].get("atr14", 1.0) or 1.0); close = float(_df.iloc[-1]["close"]); break
+    if atr <= 0: atr = 1.0
+    if df_m15 is not None and len(df_m15)>0:
+        close=float(df_m15.iloc[-1]["close"]); atr=float(df_m15.iloc[-1].get("atr14",atr) or atr)
+    elif df_m5 is not None and len(df_m5)>0:
+        close=float(df_m5.iloc[-1]["close"])
+
+    def _pick_df(*dfs):
+        """Pick first non-None DataFrame."""
+        for d in dfs:
+            if d is not None and len(d) > 0:
+                return d
+        return dfs[-1]  # fallback
+
+    asian = _gold_asian_range(_pick_df(df_m15, df_h1, df_h4), bar_time)
+
+    # ── GATE 1: H4 BIAS ──
+    g1 = _gold_v5_h4_bias(df_h4)
+    direction = g1["direction"]
+    _base = {"h4_bias":g1,"zones":{"supply":[],"demand":[]},"asian_range":asian,"warnings":[]}
+    if direction == "Wait":
+        return {**_base, "signal":"NO_SETUP","direction":"Wait",
+                "gates":{1:{"passed":False,"details":g1["details"]},2:{"passed":False,"details":"Blocked"},
+                         3:{"passed":False,"details":"Blocked"},4:{"passed":False,"details":"Blocked"}},
+                "gates_passed":0,"levels":{},"confluence":{"count":0,"items":[]},
+                "exit_check":{"exit_now":False,"details":""},"confidence":"LOW","grade":"D",
+                "summary":f"❌ {g1['details']}"}
+
+    # ── GATE 2: H1 ZONE ──
+    zones = _gold_v5_zone_detection(df_h1, lookback=120)
+    g2 = _gold_v5_zone_check(close, zones, atr, direction)
+    _base["zones"] = zones
+    exit_ck = _gold_v5_exit_check(df_m15, direction)
+
+    if not g2["passed"] and g2["status"] != "approaching":
+        return {**_base, "signal":"NO_SETUP","direction":direction,
+                "gates":{1:{"passed":True,"details":g1["details"]},2:{"passed":False,"details":g2["details"]},
+                         3:{"passed":False,"details":"Blocked"},4:{"passed":False,"details":"Blocked"}},
+                "gates_passed":1,"levels":{},"confluence":{"count":0,"items":[]},
+                "exit_check":exit_ck,"confidence":"LOW","grade":"D","zone_check":g2,
+                "summary":f"📍 {direction} bias — {g2['details']}"}
+
+    if g2["status"] == "approaching":
+        conf = _gold_v5_confluence(_pick_df(df_m15, df_m5, df_h1), direction, g2["zone"], atr, bar_time)
+        return {**_base, "signal":"MONITOR","direction":direction,
+                "gates":{1:{"passed":True,"details":g1["details"]},2:{"passed":False,"details":g2["details"]},
+                         3:{"passed":False,"details":"Wait zone touch"},4:{"passed":False,"details":"Wait zone touch"}},
+                "gates_passed":1,"levels":{},"confluence":conf,"exit_check":exit_ck,
+                "confidence":"LOW","grade":"C","zone_check":g2,
+                "summary":f"👀 MONITOR — {g2['details']}"}
+
+    # ── GATE 3: M15 CONFIRMATION ──
+    g3 = _gold_v5_m15_confirm(df_m15, direction, g2["zone"])
+    if not g3["passed"]:
+        conf = _gold_v5_confluence(_pick_df(df_m15, df_m5, df_h1), direction, g2["zone"], atr, bar_time)
+        lvls = _gold_v5_entry_levels(close, direction, g2["zone"], atr, zones, df_m15)
+        return {**_base, "signal":"SETUP_FORMING","direction":direction,
+                "gates":{1:{"passed":True,"details":g1["details"]},2:{"passed":True,"details":g2["details"]},
+                         3:{"passed":False,"details":g3["details"]},4:{"passed":False,"details":"Wait Gate 3"}},
+                "gates_passed":2,"levels":lvls,"confluence":conf,"exit_check":exit_ck,
+                "confidence":"MEDIUM" if conf["count"]>=2 else "LOW","grade":"C",
+                "zone_check":g2,"m15_confirm":g3,
+                "summary":f"🟡 SETUP — at zone, waiting M15 {direction} confirm"}
+
+    # ── GATE 4: M5 TRIGGER ──
+    g4 = _gold_v5_m5_trigger(df_m5, direction, g2["zone"], atr)
+    lvls = _gold_v5_entry_levels(close, direction, g2["zone"], atr, zones, df_m15)
+    conf = _gold_v5_confluence(_pick_df(df_m15, df_m5, df_h1), direction, g2["zone"], atr, bar_time)
+
+    if not g4["passed"]:
+        confidence = "HIGH" if conf["count"]>=3 else ("MEDIUM" if conf["count"]>=1 else "LOW")
+        return {**_base, "signal":"CONFIRMED_WAIT_TRIGGER","direction":direction,
+                "gates":{1:{"passed":True,"details":g1["details"]},2:{"passed":True,"details":g2["details"]},
+                         3:{"passed":True,"details":g3["details"]},4:{"passed":False,"details":g4["details"]}},
+                "gates_passed":3,"levels":lvls,"confluence":conf,"exit_check":exit_ck,
+                "confidence":confidence,"grade":"B","zone_check":g2,"m15_confirm":g3,"m5_trigger":g4,
+                "summary":f"🟢 CONFIRMED — waiting M5 entry candle"}
+
+    # ── ALL 4 GATES → ENTRY ──
+    confidence = "HIGH" if conf["count"]>=3 else ("MEDIUM" if conf["count"]>=1 else "LOW")
+    warns = []
+    if exit_ck.get("exit_now"): warns.append("⚠ M15 BOS against — may be late entry")
+    if conf["count"]>=4 and g1["strength"]=="strong": grade="A+"
+    elif conf["count"]>=3 or (conf["count"]>=2 and g1["strength"]=="strong"): grade="A"
+    else: grade="B"
+    if g2.get("zone",{}).get("fresh") and grade=="A": grade="A+"
+
+    return {**_base, "signal":"ENTRY","direction":direction,
+            "gates":{1:{"passed":True,"details":g1["details"]},2:{"passed":True,"details":g2["details"]},
+                     3:{"passed":True,"details":g3["details"]},4:{"passed":True,"details":g4["details"]}},
+            "gates_passed":4,"levels":lvls,"confluence":conf,"exit_check":exit_ck,
+            "confidence":confidence,"grade":grade,"zone_check":g2,"m15_confirm":g3,"m5_trigger":g4,
+            "warnings":warns,
+            "summary":f"🚀 ENTRY {direction} @ {close:.2f} | SL:{lvls['sl']:.2f} TP1:{lvls['tp1']:.2f} | {confidence} ({conf['count']} confluences)"}
+
+# ============================================================
+# END GOLD ENGINE V5
+# ============================================================
+
+# ============================================================
+# UNIVERSAL S/D GATE ENGINE — Works for ALL forex symbols
+# Same methodology: S/D zones → Structure → Entry → Alerts
+# Uses H4 (bias) → H1 (zones) → M15 (structure) → M5 (entry)
+# ============================================================
+
+def sd_gate_engine(symbol, df_h4, df_h1, df_m15, df_m5, bar_time=None):
+    """
+    Universal Supply/Demand Gate Engine for ANY symbol.
+    For XAUUSD: delegates to gold_engine_v5 (gold-specific tuning).
+    For all others: uses the same gate methodology with forex-tuned params.
+
+    Returns same structure as gold_engine_v5:
+    {signal, direction, gates, gates_passed, levels, confluence, exit_check,
+     confidence, grade, zones, warnings, summary, choch_alert, bos_against}
+    """
+    sym = norm(symbol)
+
+    # ── For gold, use the specialized V5 engine ──
+    if sym == "XAUUSD":
+        result = gold_engine_v5(df_h4, df_h1, df_m15, df_m5, bar_time)
+        # Add CHoCH/BOS alert flags
+        m15_data = result.get("m15_confirm", {})
+        result["choch_alert"] = False
+        result["bos_against"] = False
+        if m15_data:
+            choch = m15_data.get("choch_data", {})
+            bos = m15_data.get("bos_data", {})
+            dir_lower = "bullish" if result.get("direction") == "Buy" else "bearish"
+            opp = "bearish" if dir_lower == "bullish" else "bullish"
+            if choch.get(f"{opp}_choch"):
+                result["choch_alert"] = True
+            if bos.get(f"{opp}_bos"):
+                result["bos_against"] = True
+        # Add zone midpoint info
+        zc = result.get("zone_check", {})
+        if zc and zc.get("zone"):
+            z = zc["zone"]
+            result["zone_midpoint"] = z.get("midpoint", 0)
+            result["zone_midpoint_broken"] = z.get("midpoint_broken", False)
+        else:
+            result["zone_midpoint"] = 0
+            result["zone_midpoint_broken"] = False
+        return result
+
+    # ── For all other symbols: universal S/D gate system ──
+    pip = cfg(symbol).get("pip", 0.0001)
+
+    def _pick(a, b, c=None):
+        for d in [a, b, c]:
+            if d is not None and len(d) > 0: return d
+        return a
+
+    atr = 0.001; close = 0
+    for _df in [df_m5, df_m15, df_h1, df_h4]:
+        if _df is not None and len(_df) > 0:
+            atr = float(_df.iloc[-1].get("atr14", 0.001) or 0.001); close = float(_df.iloc[-1]["close"]); break
+    if atr <= 0: atr = 0.001
+    if df_m15 is not None and len(df_m15) > 0:
+        close = float(df_m15.iloc[-1]["close"]); atr = float(df_m15.iloc[-1].get("atr14", atr) or atr)
+
+    # ── GATE 1: H4 BIAS ──
+    g1 = _gold_v5_h4_bias(df_h4)
+    direction = g1["direction"]
+    _base = {"h4_bias":g1,"zones":{"supply":[],"demand":[]},"asian_range":{"valid":False},
+             "warnings":[],"choch_alert":False,"bos_against":False,"zone_midpoint":0,"zone_midpoint_broken":False}
+
+    if direction == "Wait":
+        return {**_base, "signal":"NO_SETUP","direction":"Wait",
+                "gates":{1:{"passed":False,"details":g1["details"]},2:{"passed":False,"details":"Blocked"},
+                         3:{"passed":False,"details":"Blocked"},4:{"passed":False,"details":"Blocked"}},
+                "gates_passed":0,"levels":{},"confluence":{"count":0,"items":[]},
+                "exit_check":{"exit_now":False,"details":""},"confidence":"LOW","grade":"D",
+                "summary":f"❌ {g1['details']}"}
+
+    # ── GATE 2: H1 ZONE ──
+    zones = _gold_v5_zone_detection(df_h1, lookback=120)
+    g2 = _gold_v5_zone_check(close, zones, atr, direction)
+    _base["zones"] = zones
+    exit_ck = _gold_v5_exit_check(df_m15, direction)
+
+    # Check for CHoCH/BOS against on M15 (for alerts)
+    choch_alert = False
+    bos_against = False
+    if df_m15 is not None and len(df_m15) >= 30:
+        _m15_ck = _gold_v5_m15_confirm(df_m15, direction, g2.get("zone"))
+        choch_d = _m15_ck.get("choch_data", {})
+        bos_d = _m15_ck.get("bos_data", {})
+        dir_lower = "bullish" if direction == "Buy" else "bearish"
+        opp = "bearish" if dir_lower == "bullish" else "bullish"
+        if choch_d.get(f"{opp}_choch"):
+            choch_alert = True
+        if bos_d.get(f"{opp}_bos"):
+            bos_against = True
+    _base["choch_alert"] = choch_alert
+    _base["bos_against"] = bos_against
+
+    # Zone midpoint tracking
+    if g2.get("zone"):
+        _base["zone_midpoint"] = g2["zone"].get("midpoint", 0)
+        _base["zone_midpoint_broken"] = g2["zone"].get("midpoint_broken", False)
+
+    if not g2["passed"] and g2["status"] != "approaching":
+        return {**_base, "signal":"NO_SETUP","direction":direction,
+                "gates":{1:{"passed":True,"details":g1["details"]},2:{"passed":False,"details":g2["details"]},
+                         3:{"passed":False,"details":"Blocked"},4:{"passed":False,"details":"Blocked"}},
+                "gates_passed":1,"levels":{},"confluence":{"count":0,"items":[]},
+                "exit_check":exit_ck,"confidence":"LOW","grade":"D","zone_check":g2,
+                "summary":f"📍 {direction} bias — {g2['details']}"}
+
+    if g2["status"] == "approaching":
+        conf = _gold_v5_confluence(_pick(df_m15, df_m5, df_h1), direction, g2["zone"], atr, bar_time)
+        return {**_base, "signal":"MONITOR","direction":direction,
+                "gates":{1:{"passed":True,"details":g1["details"]},2:{"passed":False,"details":g2["details"]},
+                         3:{"passed":False,"details":"Wait zone touch"},4:{"passed":False,"details":"Wait zone touch"}},
+                "gates_passed":1,"levels":{},"confluence":conf,"exit_check":exit_ck,
+                "confidence":"LOW","grade":"C","zone_check":g2,
+                "summary":f"👀 MONITOR — {g2['details']}"}
+
+    # ── GATE 3: M15 CONFIRMATION ──
+    g3 = _gold_v5_m15_confirm(df_m15, direction, g2["zone"])
+    if not g3["passed"]:
+        conf = _gold_v5_confluence(_pick(df_m15, df_m5, df_h1), direction, g2["zone"], atr, bar_time)
+        lvls = _gold_v5_entry_levels(close, direction, g2["zone"], atr, zones, df_m15)
+        return {**_base, "signal":"SETUP_FORMING","direction":direction,
+                "gates":{1:{"passed":True,"details":g1["details"]},2:{"passed":True,"details":g2["details"]},
+                         3:{"passed":False,"details":g3["details"]},4:{"passed":False,"details":"Wait Gate 3"}},
+                "gates_passed":2,"levels":lvls,"confluence":conf,"exit_check":exit_ck,
+                "confidence":"MEDIUM" if conf["count"]>=2 else "LOW","grade":"C",
+                "zone_check":g2,"m15_confirm":g3,
+                "summary":f"🟡 SETUP — at zone, waiting M15 {direction} confirm"}
+
+    # ── GATE 4: M5 TRIGGER ──
+    g4 = _gold_v5_m5_trigger(df_m5, direction, g2["zone"], atr)
+    lvls = _gold_v5_entry_levels(close, direction, g2["zone"], atr, zones, df_m15)
+    conf = _gold_v5_confluence(_pick(df_m15, df_m5, df_h1), direction, g2["zone"], atr, bar_time)
+
+    if not g4["passed"]:
+        confidence = "HIGH" if conf["count"]>=3 else ("MEDIUM" if conf["count"]>=1 else "LOW")
+        return {**_base, "signal":"CONFIRMED_WAIT_TRIGGER","direction":direction,
+                "gates":{1:{"passed":True,"details":g1["details"]},2:{"passed":True,"details":g2["details"]},
+                         3:{"passed":True,"details":g3["details"]},4:{"passed":False,"details":g4["details"]}},
+                "gates_passed":3,"levels":lvls,"confluence":conf,"exit_check":exit_ck,
+                "confidence":confidence,"grade":"B","zone_check":g2,"m15_confirm":g3,"m5_trigger":g4,
+                "summary":f"🟢 CONFIRMED — waiting M5 entry candle"}
+
+    # ── ALL 4 GATES → ENTRY ──
+    confidence = "HIGH" if conf["count"]>=3 else ("MEDIUM" if conf["count"]>=1 else "LOW")
+    warns = []
+    if exit_ck.get("exit_now"): warns.append("⚠ M15 BOS against — may be late")
+    if conf["count"]>=4 and g1["strength"]=="strong": grade="A+"
+    elif conf["count"]>=3 or (conf["count"]>=2 and g1["strength"]=="strong"): grade="A"
+    else: grade="B"
+    if g2.get("zone",{}).get("fresh") and grade=="A": grade="A+"
+
+    return {**_base, "signal":"ENTRY","direction":direction,
+            "gates":{1:{"passed":True,"details":g1["details"]},2:{"passed":True,"details":g2["details"]},
+                     3:{"passed":True,"details":g3["details"]},4:{"passed":True,"details":g4["details"]}},
+            "gates_passed":4,"levels":lvls,"confluence":conf,"exit_check":exit_ck,
+            "confidence":confidence,"grade":grade,"zone_check":g2,"m15_confirm":g3,"m5_trigger":g4,
+            "warnings":warns,
+            "summary":f"🚀 ENTRY {direction} @ {close} | SL:{lvls['sl']} TP1:{lvls['tp1']} | {confidence}"}
+
+# ============================================================
+# END UNIVERSAL S/D GATE ENGINE
+# ============================================================
+
 def compute_lot(balance, risk_pct, sl_pips, symbol):
     pip_val = {"USDJPY":9.1,"GBPJPY":9.1,"EURJPY":9.1,
                "XAUUSD":10.0,"XTIUSD":10.0,
@@ -2628,11 +3309,27 @@ def analyze_symbol(symbol, interval, bars, td_key):
         df   = add_indicators(fetch_bars(symbol, interval, bars, td_key))
         df_h4= add_indicators(fetch_bars(symbol, "4h", 200, td_key))
         df_h1 = None
-        if norm(symbol) == "XAUUSD":
-            try:
-                df_h1 = add_indicators(fetch_bars(symbol, "1h", 200, td_key))
-            except Exception:
-                df_h1 = None
+        df_m15 = None
+        df_m5 = None
+        # S/D Gate Engine: fetch H1, M15, M5 for ALL symbols
+        try:
+            df_h1 = add_indicators(fetch_bars(symbol, "1h", 200, td_key))
+        except Exception:
+            df_h1 = None
+        try:
+            if interval == "15m":
+                df_m15 = df
+            else:
+                df_m15 = add_indicators(fetch_bars(symbol, "15m", 200, td_key))
+        except Exception:
+            df_m15 = None
+        try:
+            if interval == "5m":
+                df_m5 = df
+            else:
+                df_m5 = add_indicators(fetch_bars(symbol, "5m", 200, td_key))
+        except Exception:
+            df_m5 = None
     except Exception as e:
         return {"error": str(e), "symbol": symbol}
 
@@ -2643,13 +3340,27 @@ def analyze_symbol(symbol, interval, bars, td_key):
 
     score, bd, grade, warns = score_signal(df, df_h4, symbol, direction)
 
-    # ── Gold Engine overlay (XAUUSD only) ─────────────────────
+    # ── S/D Gate Engine — for ALL symbols ─────────────────────
     gold_info = {}
-    if norm(symbol) == "XAUUSD":
-        score, gold_info, grade, gold_warns = gold_engine_score(
-            df, df_h4, df_h1, direction, score, grade)
-        warns.extend(gold_warns)
-        bd["Gold Engine"] = gold_info.get("bonus", 0)
+    gold_v5 = {}
+    sd_result = sd_gate_engine(symbol, df_h4, df_h1, df_m15, df_m5)
+    # Override direction from gate engine H4 bias
+    if sd_result.get("direction") and sd_result["direction"] != "Wait":
+        direction = sd_result["direction"]
+    # Map gate grade
+    v5_grade = sd_result.get("grade", "D")
+    if v5_grade in ("A+", "A", "B", "C", "D"):
+        grade = v5_grade
+    # Map gates to score (for display compatibility)
+    gp = sd_result.get("gates_passed", 0)
+    score = {0: 15, 1: 30, 2: 50, 3: 70, 4: 90}.get(gp, 15)
+    # Use gate levels if available
+    v5_levels = sd_result.get("levels", {})
+    if v5_levels.get("sl"):
+        levels = {"sl": v5_levels["sl"], "tp1": v5_levels["tp1"], "tp2": v5_levels["tp2"],
+                  "rr": v5_levels.get("rr1", 0), "sl_d": v5_levels.get("sl_pips", 0) * cfg(symbol).get("pip", 0.0001)}
+    warns.extend(sd_result.get("warnings", []))
+    gold_v5 = sd_result  # store for UI (works for all symbols now)
 
     # ── Spike detection (same engine as backtest) ─────────────
     spike_info = detect_spike(df, atr, symbol, lookback=5)
@@ -2673,6 +3384,7 @@ def analyze_symbol(symbol, interval, bars, td_key):
 
     return {
         "symbol": symbol, "df": df, "df_h4": df_h4, "df_h1": df_h1,
+        "df_m15": df_m15, "df_m5": df_m5,
         "close": close, "atr": atr,
         "direction": direction, "score": score, "bd": bd, "grade": grade, "warns": warns,
         "sl": levels["sl"], "tp1": levels["tp1"], "tp2": levels["tp2"],
@@ -2686,6 +3398,7 @@ def analyze_symbol(symbol, interval, bars, td_key):
         "h4_trend": _h4_trend(df_h4),
         "spike": spike_info,
         "gold": gold_info,
+        "gold_v5": gold_v5,
         "smart_entry": smart_entry,
         "error": None,
     }
@@ -2713,7 +3426,7 @@ def log_trade(trade, exit_price, result, notes=""):
     dir_   = trade["direction"]
     move   = (ex-entry) if dir_=="Buy" else (entry-ex)
     pnl_r  = round(move/risk,2) if risk > 0 else 0
-    j.append({
+    record = {
         "id": trade.get("id","?")[:6],
         "ts": pd.Timestamp.utcnow().isoformat()[:16],
         "symbol": trade.get("symbol","?"),
@@ -2724,7 +3437,22 @@ def log_trade(trade, exit_price, result, notes=""):
         "score": trade.get("locked_score",0),
         "session": trade.get("session","?"),
         "notes": notes,
-    })
+    }
+    # ── Capture analysis context for learning ──
+    ctx = trade.get("context", {})
+    if ctx:
+        record["gates_passed"] = ctx.get("gates_passed", 0)
+        record["signal"] = ctx.get("signal", "")
+        record["confidence"] = ctx.get("confidence", "")
+        record["h4_bias"] = ctx.get("h4_bias", "")
+        record["zone_status"] = ctx.get("zone_status", "")
+        record["zone_quality"] = ctx.get("zone_quality", 0)
+        record["zone_fresh"] = ctx.get("zone_fresh", False)
+        record["m15_signal"] = ctx.get("m15_signal", "")
+        record["m5_trigger"] = ctx.get("m5_trigger", "")
+        record["confluence"] = ctx.get("confluence_items", "")
+        record["killzone"] = ctx.get("killzone", "")
+    j.append(record)
     save_journal(j)
     return j
 
@@ -2810,6 +3538,387 @@ def render_score_breakdown(bd, score, grade):
                  f"<span style='color:{bar_col};width:28px;text-align:right;font-family:Space Mono,monospace;'>{v}</span></div>")
     html += f"<div style='height:4px;background:#131a22;border-radius:2px;margin-top:8px;overflow:hidden;'><div style='width:{score}%;height:100%;background:{gc};border-radius:2px;'></div></div></div>"
     st.markdown(html, unsafe_allow_html=True)
+
+# ============================================================
+# VISUAL STRUCTURE CHARTS — S/D Zones + Swings + BOS/CHoCH
+# ============================================================
+def _detect_visual_swings(df, pivot_len=2):
+    """Detect swing highs/lows with time+price coordinates for chart drawing."""
+    swings = {"highs": [], "lows": []}
+    if df is None or len(df) < pivot_len * 2 + 1:
+        return swings
+    for i in range(pivot_len, len(df) - pivot_len):
+        h = float(df.iloc[i]["high"]); l = float(df.iloc[i]["low"])
+        t = df.iloc[i]["time"] if "time" in df.columns else i
+        is_sh = all(h >= float(df.iloc[i - j]["high"]) for j in range(1, pivot_len + 1)) and \
+                all(h >= float(df.iloc[i + j]["high"]) for j in range(1, pivot_len + 1))
+        is_sl = all(l <= float(df.iloc[i - j]["low"]) for j in range(1, pivot_len + 1)) and \
+                all(l <= float(df.iloc[i + j]["low"]) for j in range(1, pivot_len + 1))
+        if is_sh:
+            swings["highs"].append({"price": h, "time": t, "idx": i})
+        if is_sl:
+            swings["lows"].append({"price": l, "time": t, "idx": i})
+    return swings
+
+
+def _detect_visual_bos_choch(df, swings):
+    """Detect BOS/CHoCH events with chart coordinates for drawing."""
+    events = []
+    shs = swings["highs"]; sls = swings["lows"]
+    if len(shs) < 2 or len(sls) < 2:
+        return events
+    # Walk through swing pairs to find all BOS/CHoCH in visible range
+    sh_pairs = list(zip(shs[:-1], shs[1:]))
+    sl_pairs = list(zip(sls[:-1], sls[1:]))
+    # Track recent swing context for CHoCH detection
+    for k in range(max(len(sh_pairs), len(sl_pairs))):
+        if k < len(sh_pairs):
+            prev_sh, last_sh = sh_pairs[k]
+            # Find candle that broke this swing high
+            for i in range(last_sh["idx"] + 1, len(df)):
+                c = float(df.iloc[i]["close"])
+                t = df.iloc[i]["time"] if "time" in df.columns else i
+                if c > last_sh["price"]:
+                    # Is it BOS (HH continuation) or CHoCH (reversal from LL)?
+                    # Check if lows were making LL before this break
+                    recent_sls = [s for s in sls if s["idx"] < i]
+                    is_choch = (len(recent_sls) >= 2 and
+                                recent_sls[-1]["price"] < recent_sls[-2]["price"])
+                    is_bos = last_sh["price"] > prev_sh["price"]
+                    if is_choch and not is_bos:
+                        events.append({"type": "CHoCH", "direction": "bullish",
+                                       "price": last_sh["price"], "time": t,
+                                       "from_time": last_sh["time"], "label": "CHoCH"})
+                    elif is_bos:
+                        events.append({"type": "BOS", "direction": "bullish",
+                                       "price": last_sh["price"], "time": t,
+                                       "from_time": last_sh["time"], "label": "BOS"})
+                    break
+        if k < len(sl_pairs):
+            prev_sl, last_sl = sl_pairs[k]
+            for i in range(last_sl["idx"] + 1, len(df)):
+                c = float(df.iloc[i]["close"])
+                t = df.iloc[i]["time"] if "time" in df.columns else i
+                if c < last_sl["price"]:
+                    recent_shs = [s for s in shs if s["idx"] < i]
+                    is_choch = (len(recent_shs) >= 2 and
+                                recent_shs[-1]["price"] > recent_shs[-2]["price"])
+                    is_bos = last_sl["price"] < prev_sl["price"]
+                    if is_choch and not is_bos:
+                        events.append({"type": "CHoCH", "direction": "bearish",
+                                       "price": last_sl["price"], "time": t,
+                                       "from_time": last_sl["time"], "label": "CHoCH"})
+                    elif is_bos:
+                        events.append({"type": "BOS", "direction": "bearish",
+                                       "price": last_sl["price"], "time": t,
+                                       "from_time": last_sl["time"], "label": "BOS"})
+                    break
+    return events
+
+
+def render_structure_chart(df, timeframe, zones=None, symbol="", direction=None,
+                           levels=None, height=280, show_indicators=False):
+    """Render annotated candlestick chart with S/D zones, swings, BOS/CHoCH, 50% midpoint."""
+    if df is None or len(df) < 10:
+        return None
+    fig = go.Figure()
+    # ── Candlestick ──
+    fig.add_trace(go.Candlestick(
+        x=df["time"], open=df["open"], high=df["high"],
+        low=df["low"], close=df["close"], name="Price",
+        increasing_line_color="#10b981", decreasing_line_color="#ef4444"))
+    # ── EMAs ──
+    for col_, c_ in [("ema20", "#f59e0b"), ("ema50", "#8b5cf6"), ("ema200", "#3b82f6")]:
+        if col_ in df.columns:
+            fig.add_trace(go.Scatter(x=df["time"], y=df[col_], name=col_.upper(),
+                                     line=dict(color=c_, width=1), opacity=0.5, showlegend=False))
+    # ── S/D Zones as rectangles ──
+    if zones:
+        t_start = df.iloc[0]["time"]; t_end = df.iloc[-1]["time"]
+        for z in zones.get("supply", []):
+            fig.add_shape(type="rect", x0=t_start, x1=t_end, y0=z["low"], y1=z["high"],
+                          fillcolor="rgba(239,68,68,0.10)", line=dict(color="rgba(239,68,68,0.5)", width=1))
+            _fr = "FRESH" if z.get("fresh") else ("1st" if z.get("first_visit") else "")
+            fig.add_annotation(x=t_end, y=z["high"], text=f"Supply {_fr} Q:{z.get('quality', 0)}",
+                               showarrow=False, font=dict(size=8, color="#ef4444"),
+                               xanchor="right", yanchor="bottom", bgcolor="rgba(0,0,0,0.6)")
+            # 50% midpoint
+            fig.add_shape(type="line", x0=t_start, x1=t_end, y0=z["midpoint"], y1=z["midpoint"],
+                          line=dict(color="rgba(239,68,68,0.4)", width=1, dash="dot"))
+            fig.add_annotation(x=t_start, y=z["midpoint"], text="50%",
+                               showarrow=False, font=dict(size=7, color="#ef4444"),
+                               xanchor="left", yanchor="middle", bgcolor="rgba(0,0,0,0.5)")
+        for z in zones.get("demand", []):
+            fig.add_shape(type="rect", x0=t_start, x1=t_end, y0=z["low"], y1=z["high"],
+                          fillcolor="rgba(16,185,129,0.10)", line=dict(color="rgba(16,185,129,0.5)", width=1))
+            _fr = "FRESH" if z.get("fresh") else ("1st" if z.get("first_visit") else "")
+            fig.add_annotation(x=t_end, y=z["low"], text=f"Demand {_fr} Q:{z.get('quality', 0)}",
+                               showarrow=False, font=dict(size=8, color="#10b981"),
+                               xanchor="right", yanchor="top", bgcolor="rgba(0,0,0,0.6)")
+            fig.add_shape(type="line", x0=t_start, x1=t_end, y0=z["midpoint"], y1=z["midpoint"],
+                          line=dict(color="rgba(16,185,129,0.4)", width=1, dash="dot"))
+            fig.add_annotation(x=t_start, y=z["midpoint"], text="50%",
+                               showarrow=False, font=dict(size=7, color="#10b981"),
+                               xanchor="left", yanchor="middle", bgcolor="rgba(0,0,0,0.5)")
+    # ── Swing Points ──
+    pivot_len = 4 if timeframe == "H4" else (3 if timeframe == "H1" else 2)
+    swings = _detect_visual_swings(df, pivot_len)
+    if swings["highs"]:
+        fig.add_trace(go.Scatter(
+            x=[s["time"] for s in swings["highs"]], y=[s["price"] for s in swings["highs"]],
+            mode="markers+text", name="SH", marker=dict(symbol="triangle-down", size=7, color="#ef4444"),
+            text=["HH" if i > 0 and s["price"] > swings["highs"][i-1]["price"] else
+                  ("LH" if i > 0 else "SH") for i, s in enumerate(swings["highs"])],
+            textposition="top center", textfont=dict(size=7, color="#ef4444"), showlegend=False))
+    if swings["lows"]:
+        fig.add_trace(go.Scatter(
+            x=[s["time"] for s in swings["lows"]], y=[s["price"] for s in swings["lows"]],
+            mode="markers+text", name="SL", marker=dict(symbol="triangle-up", size=7, color="#10b981"),
+            text=["HL" if i > 0 and s["price"] > swings["lows"][i-1]["price"] else
+                  ("LL" if i > 0 else "SL") for i, s in enumerate(swings["lows"])],
+            textposition="bottom center", textfont=dict(size=7, color="#10b981"), showlegend=False))
+    # ── Structure lines connecting swings ──
+    if len(swings["highs"]) >= 2:
+        fig.add_trace(go.Scatter(
+            x=[s["time"] for s in swings["highs"]], y=[s["price"] for s in swings["highs"]],
+            mode="lines", line=dict(color="rgba(239,68,68,0.25)", width=1, dash="dash"), showlegend=False))
+    if len(swings["lows"]) >= 2:
+        fig.add_trace(go.Scatter(
+            x=[s["time"] for s in swings["lows"]], y=[s["price"] for s in swings["lows"]],
+            mode="lines", line=dict(color="rgba(16,185,129,0.25)", width=1, dash="dash"), showlegend=False))
+    # ── BOS/CHoCH Events ──
+    events = _detect_visual_bos_choch(df, swings)
+    for ev in events:
+        is_choch = ev["type"] == "CHoCH"
+        bull = ev["direction"] == "bullish"
+        color = "#ff4444" if is_choch else ("#10b981" if bull else "#ef4444")
+        lw = 2.5 if is_choch else 1.5
+        fig.add_shape(type="line", x0=ev["from_time"], x1=ev["time"], y0=ev["price"], y1=ev["price"],
+                      line=dict(color=color, width=lw, dash="solid" if is_choch else "dash"))
+        arrow_y = ev["price"] * (1.001 if bull else 0.999)
+        label_text = ev["label"] + (" ↑" if bull else " ↓")
+        fig.add_annotation(
+            x=ev["time"], y=arrow_y, text=label_text,
+            showarrow=True, arrowhead=2, arrowsize=1.2, arrowcolor=color,
+            font=dict(size=10 if is_choch else 8, color="#ffffff" if is_choch else color,
+                      family="Space Mono"),
+            bgcolor="#cc0000" if is_choch else "rgba(0,0,0,0.6)",
+            bordercolor=color, borderwidth=2 if is_choch else 1, borderpad=3)
+    # ── Entry / SL / TP levels ──
+    if levels and timeframe in ("M15", "M5"):
+        if levels.get("sl"):
+            fig.add_hline(y=levels["sl"], line_color="#ef4444", line_dash="dash", line_width=1,
+                          annotation_text="SL", annotation_font_color="#ef4444", annotation_font_size=9,
+                          annotation_position="bottom right")
+        if levels.get("tp1"):
+            fig.add_hline(y=levels["tp1"], line_color="#10b981", line_dash="dash", line_width=1,
+                          annotation_text="TP1", annotation_font_color="#10b981", annotation_font_size=9,
+                          annotation_position="top right")
+        if levels.get("tp2"):
+            fig.add_hline(y=levels["tp2"], line_color="#84cc16", line_dash="dot", line_width=1,
+                          annotation_text="TP2", annotation_font_color="#84cc16", annotation_font_size=9,
+                          annotation_position="top right")
+    # ── Layout ──
+    tf_colors = {"H4": "#3b82f6", "H1": "#8b5cf6", "M15": "#f59e0b", "M5": "#10b981"}
+    tf_col = tf_colors.get(timeframe, "#8b9ab0")
+    _dir_icon = "▲" if direction == "Buy" else ("▼" if direction == "Sell" else "—")
+    _dir_col = "#10b981" if direction == "Buy" else ("#ef4444" if direction == "Sell" else "#8b9ab0")
+    fig.update_layout(
+        title=dict(text=f"<span style='color:{tf_col}'>{timeframe}</span>  "
+                        f"<span style='color:{_dir_col}'>{_dir_icon}</span>  {symbol}",
+                   font=dict(size=12, family="Space Mono")),
+        paper_bgcolor="#080c10", plot_bgcolor="#080c10",
+        font=dict(color="#e8edf2", size=10), height=height,
+        xaxis_rangeslider_visible=False, showlegend=False,
+        margin=dict(l=0, r=0, t=30, b=0),
+        xaxis=dict(gridcolor="rgba(255,255,255,0.03)"),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.05)", side="right"))
+    return fig
+
+
+def render_stacked_structure_charts(a, symbol):
+    """Render H4 → H1 → M15 → M5 stacked structure charts with annotations."""
+    gv5 = a.get("gold_v5", {})
+    zones = gv5.get("zones", {})
+    v5_dir = gv5.get("direction", a.get("direction", "Wait"))
+    levels = gv5.get("levels", {})
+    gates = gv5.get("gates", {})
+    # ── Structure break warning banner ──
+    exit_check = gv5.get("exit_check", {})
+    if exit_check.get("exit_now"):
+        st.markdown(
+            "<div style='background:rgba(255,0,0,0.2);border:2px solid #ff0000;"
+            "border-radius:8px;padding:12px;margin:8px 0;animation:alertpulse 1s infinite;'>"
+            "<div style='font-size:16px;font-weight:900;color:#ff4444;text-align:center;"
+            "font-family:Space Mono,monospace;'>STRUCTURE BROKEN — STOP LOSS NOW</div>"
+            "<div style='font-size:11px;color:#fca5a5;text-align:center;margin-top:4px;'>"
+            + str(exit_check.get('details', 'M15 BOS against your position — EXIT IMMEDIATELY'))
+            + "</div></div>", unsafe_allow_html=True)
+    if gv5.get("choch_alert"):
+        st.markdown(
+            "<div style='background:rgba(255,0,0,0.25);border:2px solid #ff0000;"
+            "border-radius:8px;padding:12px;margin:8px 0;animation:alertpulse 0.8s infinite;'>"
+            "<div style='font-size:16px;font-weight:900;color:#ff0000;text-align:center;"
+            "font-family:Space Mono,monospace;'>CHoCH DETECTED — STRUCTURE CHANGED</div>"
+            "<div style='font-size:11px;color:#fca5a5;text-align:center;margin-top:4px;'>"
+            "Change of Character against your position. Close trade immediately!</div></div>",
+            unsafe_allow_html=True)
+    # ── Chart configs per timeframe ──
+    charts = [
+        {"tf": "H4", "df": a.get("df_h4"), "bars": 80, "h": 240,
+         "gate": gates.get(1, {}), "gate_name": "G1: H4 Bias", "zones": None},
+        {"tf": "H1", "df": a.get("df_h1"), "bars": 120, "h": 260,
+         "gate": gates.get(2, {}), "gate_name": "G2: H1 Zone", "zones": zones},
+        {"tf": "M15", "df": a.get("df_m15"), "bars": 100, "h": 260,
+         "gate": gates.get(3, {}), "gate_name": "G3: M15 Confirm", "zones": zones},
+        {"tf": "M5", "df": a.get("df_m5"), "bars": 60, "h": 240,
+         "gate": gates.get(4, {}), "gate_name": "G4: M5 Trigger", "zones": zones},
+    ]
+    for ch in charts:
+        df_tf = ch["df"]
+        if df_tf is None or len(df_tf) < 10:
+            st.markdown(f"<div style='color:#4a5568;font-size:11px;padding:4px 0;'>"
+                        f"{ch['tf']}: No data</div>", unsafe_allow_html=True)
+            continue
+        df_plot = df_tf.tail(ch["bars"])
+        # Gate status badge
+        g_passed = ch["gate"].get("passed", False)
+        g_detail = ch["gate"].get("details", "—")
+        g_color = "#10b981" if g_passed else "#ef4444"
+        g_icon = "✅" if g_passed else "❌"
+        st.markdown(
+            f"<div style='display:flex;align-items:center;gap:8px;margin:10px 0 2px;'>"
+            f"<span style='font-size:11px;font-family:Space Mono,monospace;"
+            f"color:{g_color};font-weight:700;'>{g_icon} {ch['gate_name']}</span>"
+            f"<span style='font-size:10px;color:#8b9ab0;'>{g_detail}</span></div>",
+            unsafe_allow_html=True)
+        # Render chart
+        fig = render_structure_chart(
+            df_plot, ch["tf"], zones=ch["zones"], symbol=symbol,
+            direction=v5_dir, levels=levels, height=ch["h"])
+        if fig:
+            st.plotly_chart(fig, use_container_width=True, key=f"struct_{symbol}_{ch['tf']}")
+
+
+# ============================================================
+# TRADE PERFORMANCE LEARNING ENGINE
+# ============================================================
+def analyze_trade_patterns(journal_data):
+    """Analyze win/loss patterns from trade history. Returns insights dict."""
+    if not journal_data or len(journal_data) < 3:
+        return None
+    insights = {"total": len(journal_data), "patterns": [], "recommendations": []}
+    wins = [t for t in journal_data if t.get("result") in ("Win", "WIN")]
+    losses = [t for t in journal_data if t.get("result") in ("Loss", "LOSS")]
+    insights["win_rate"] = len(wins) / len(journal_data) * 100 if journal_data else 0
+    insights["avg_win_r"] = sum(t.get("pnl_r", 0) for t in wins) / len(wins) if wins else 0
+    insights["avg_loss_r"] = sum(t.get("pnl_r", 0) for t in losses) / len(losses) if losses else 0
+    # ── Pattern 1: Win rate by grade ──
+    grade_stats = {}
+    for t in journal_data:
+        g = t.get("grade") or t.get("locked_grade") or "?"
+        grade_stats.setdefault(g, {"wins": 0, "losses": 0, "total": 0})
+        grade_stats[g]["total"] += 1
+        if t.get("result") in ("Win", "WIN"):
+            grade_stats[g]["wins"] += 1
+        elif t.get("result") in ("Loss", "LOSS"):
+            grade_stats[g]["losses"] += 1
+    insights["by_grade"] = grade_stats
+    for g, s in grade_stats.items():
+        wr = s["wins"] / s["total"] * 100 if s["total"] else 0
+        if s["total"] >= 3 and wr < 40:
+            insights["recommendations"].append(
+                f"Avoid grade {g} trades — only {wr:.0f}% win rate over {s['total']} trades")
+        if s["total"] >= 3 and wr >= 70:
+            insights["patterns"].append(
+                f"Grade {g} trades are your sweet spot — {wr:.0f}% win rate")
+    # ── Pattern 2: Win rate by symbol ──
+    sym_stats = {}
+    for t in journal_data:
+        s = t.get("symbol", "?")
+        sym_stats.setdefault(s, {"wins": 0, "losses": 0, "total": 0, "pnl": 0})
+        sym_stats[s]["total"] += 1
+        sym_stats[s]["pnl"] += t.get("pnl_r", 0)
+        if t.get("result") in ("Win", "WIN"):
+            sym_stats[s]["wins"] += 1
+        elif t.get("result") in ("Loss", "LOSS"):
+            sym_stats[s]["losses"] += 1
+    insights["by_symbol"] = sym_stats
+    for s, st_ in sym_stats.items():
+        wr = st_["wins"] / st_["total"] * 100 if st_["total"] else 0
+        if st_["total"] >= 3 and st_["pnl"] < -2:
+            insights["recommendations"].append(
+                f"Stop trading {s} — net {st_['pnl']:+.1f}R loss over {st_['total']} trades")
+        if st_["total"] >= 3 and wr >= 65:
+            insights["patterns"].append(f"{s} is profitable — {wr:.0f}% win rate, {st_['pnl']:+.1f}R total")
+    # ── Pattern 3: Win rate by session/killzone ──
+    sess_stats = {}
+    for t in journal_data:
+        se = t.get("session") or t.get("killzone") or "?"
+        sess_stats.setdefault(se, {"wins": 0, "losses": 0, "total": 0})
+        sess_stats[se]["total"] += 1
+        if t.get("result") in ("Win", "WIN"):
+            sess_stats[se]["wins"] += 1
+        elif t.get("result") in ("Loss", "LOSS"):
+            sess_stats[se]["losses"] += 1
+    insights["by_session"] = sess_stats
+    for se, s in sess_stats.items():
+        wr = s["wins"] / s["total"] * 100 if s["total"] else 0
+        if s["total"] >= 3 and wr < 35:
+            insights["recommendations"].append(
+                f"Avoid trading during {se} — only {wr:.0f}% win rate")
+    # ── Pattern 4: Consecutive losses ──
+    max_streak = 0; curr_streak = 0
+    for t in journal_data:
+        if t.get("result") in ("Loss", "LOSS"):
+            curr_streak += 1; max_streak = max(max_streak, curr_streak)
+        else:
+            curr_streak = 0
+    if max_streak >= 3:
+        insights["recommendations"].append(
+            f"You had a {max_streak}-loss streak. Consider taking a break after 3 consecutive losses.")
+    insights["max_loss_streak"] = max_streak
+    # ── Pattern 5: Risk/reward analysis ──
+    if wins and losses:
+        avg_win = insights["avg_win_r"]; avg_loss = abs(insights["avg_loss_r"])
+        if avg_loss > 0 and avg_win / avg_loss < 1.5:
+            insights["recommendations"].append(
+                f"Your avg win ({avg_win:.1f}R) is too close to avg loss ({avg_loss:.1f}R). "
+                f"Aim for 2:1+ R:R or improve entry precision.")
+    return insights
+
+
+def render_trade_insights(insights):
+    """Render trade pattern analysis as UI cards."""
+    if not insights:
+        return
+    st.markdown("<div class='mono-title' style='font-size:12px;margin-top:16px;'>"
+                "TRADE INTELLIGENCE — LEARNING FROM YOUR HISTORY</div>", unsafe_allow_html=True)
+    # Summary metrics
+    wr = insights.get("win_rate", 0)
+    wr_col = "#10b981" if wr >= 60 else ("#f59e0b" if wr >= 45 else "#ef4444")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Win Rate", f"{wr:.0f}%")
+    c2.metric("Avg Win", f"{insights.get('avg_win_r', 0):+.1f}R")
+    c3.metric("Avg Loss", f"{insights.get('avg_loss_r', 0):.1f}R")
+    c4.metric("Max Loss Streak", insights.get("max_loss_streak", 0))
+    # Winning patterns
+    if insights.get("patterns"):
+        html = "<div style='background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.3);border-radius:8px;padding:10px 14px;margin:6px 0;'>"
+        html += "<div style='font-size:11px;color:#10b981;font-weight:700;font-family:Space Mono,monospace;margin-bottom:6px;'>YOUR WINNING PATTERNS</div>"
+        for p in insights["patterns"]:
+            html += f"<div style='font-size:11px;color:#6ee7b7;padding:2px 0;'>✅ {p}</div>"
+        html += "</div>"
+        st.markdown(html, unsafe_allow_html=True)
+    # Recommendations (things to fix)
+    if insights.get("recommendations"):
+        html = "<div style='background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:10px 14px;margin:6px 0;'>"
+        html += "<div style='font-size:11px;color:#ef4444;font-weight:700;font-family:Space Mono,monospace;margin-bottom:6px;'>AREAS TO IMPROVE</div>"
+        for r in insights["recommendations"]:
+            html += f"<div style='font-size:11px;color:#fca5a5;padding:2px 0;'>⚠ {r}</div>"
+        html += "</div>"
+        st.markdown(html, unsafe_allow_html=True)
+
 
 def render_price_chart(df, symbol, entry=None, sl=None, tp1=None, tp2=None, title="PRICE CHART"):
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
@@ -2914,11 +4023,44 @@ def render_trade_tracker(symbol, current_price, a=None, td_key=""):
                 grade_lock = a.get("grade","?") if a else "?"
                 score_lock = a.get("score",0)   if a else 0
                 sess_lock  = a.get("session","?") if a else "?"
-                st.session_state.active_trades.append({
-                    "id": str(uuid.uuid4())[:8], "symbol": symbol,
+                trade_id = str(uuid.uuid4())[:8]
+                # ── Capture full analysis context for learning ──
+                _gv5 = a.get("gold_v5", {}) if a else {}
+                _ctx = {}
+                if _gv5:
+                    _ctx = {
+                        "gates_passed": _gv5.get("gates_passed", 0),
+                        "signal": _gv5.get("signal", ""),
+                        "confidence": _gv5.get("confidence", ""),
+                        "h4_bias": _gv5.get("h4_bias", {}).get("trend", ""),
+                        "h4_strength": _gv5.get("h4_bias", {}).get("strength", ""),
+                        "zone_status": _gv5.get("zone_check", {}).get("status", ""),
+                        "zone_quality": _gv5.get("zone_check", {}).get("quality", 0),
+                        "zone_fresh": _gv5.get("zone_check", {}).get("zone", {}).get("fresh", False) if _gv5.get("zone_check", {}).get("zone") else False,
+                        "m15_signal": _gv5.get("m15_confirm", {}).get("signal", ""),
+                        "m5_trigger": _gv5.get("m5_trigger", {}).get("type", ""),
+                        "confluence_count": _gv5.get("confluence", {}).get("count", 0),
+                        "confluence_items": ",".join(_gv5.get("confluence", {}).get("items", [])),
+                        "killzone": _gv5.get("confluence", {}).get("killzone", ""),
+                        "midpoint_broken": _gv5.get("zone_midpoint_broken", False),
+                    }
+                trade_data = {
+                    "id": trade_id, "symbol": symbol,
                     "entry":me,"sl":ms,"direction":md,"lot":ml,"tp1":mt1,"tp2":mt2,
                     "locked_grade":grade_lock,"locked_score":score_lock,"session":sess_lock,
-                })
+                    "context": _ctx, "opened_at": pd.Timestamp.utcnow().isoformat(),
+                }
+                st.session_state.active_trades.append(trade_data)
+                # ── Persist to Supabase so trades survive logout ──
+                if _sb_ok():
+                    sb_upsert("trades", {
+                        "id": trade_id, "symbol": symbol,
+                        "direction": md, "entry": float(me), "sl": float(ms),
+                        "tp1": float(mt1), "tp2": float(mt2),
+                        "lot": float(ml), "locked_grade": grade_lock,
+                        "locked_score": int(score_lock),
+                        "opened_at": pd.Timestamp.utcnow().isoformat(),
+                    })
                 st.success(f"Trade entered: {symbol} {md}"); st.rerun()
 
     # ── Active trade cards ──
@@ -3032,6 +4174,23 @@ def render_trade_tracker(symbol, current_price, a=None, td_key=""):
                 cc1,cc2 = st.columns(2)
                 if cc1.button("💾 Save & Close", key=f"btn_sc_{tid}"):
                     log_trade(t, ep, res, note)
+                    # ── Persist closed trade to Supabase journal ──
+                    if _sb_ok():
+                        _entry = float(t["entry"]); _sl = float(t["sl"]); _ex = float(ep)
+                        _risk = abs(_entry - _sl)
+                        _move = (_ex - _entry) if t["direction"] == "Buy" else (_entry - _ex)
+                        _pnl_r = round(_move / _risk, 2) if _risk > 0 else 0
+                        sb_insert("journal", {
+                            "symbol": t.get("symbol"), "direction": t["direction"],
+                            "entry": _entry, "exit_price": _ex, "sl": _sl,
+                            "tp1": t.get("tp1"), "tp2": t.get("tp2"),
+                            "lot": t.get("lot", 0.01), "pnl_r": _pnl_r,
+                            "outcome": res, "grade": t.get("locked_grade"),
+                            "score": int(t.get("locked_score", 0)),
+                            "notes": note,
+                            "opened_at": t.get("opened_at", pd.Timestamp.utcnow().isoformat()),
+                        })
+                        sb_delete("trades", f"id=eq.{tid}")
                     st.session_state.active_trades = [x for x in st.session_state.active_trades if x.get("id")!=tid]
                     st.session_state.pop(ck,None)
                     st.success("Trade logged!"); st.rerun()
@@ -3224,89 +4383,190 @@ def page_symbol(symbol):
             f"| Body: {sp_info.get('body_ratio',0)*100:.0f}% | Dir: {sp_info['direction']}</span></div>",
             unsafe_allow_html=True)
 
-    # ── Gold Engine Panel (XAUUSD only) ────────────────────────
-    gi = a.get("gold", {})
-    if gi and norm(symbol) == "XAUUSD":
-        ar = gi.get("asian_range", {})
-        bo = gi.get("breakout", "no_data")
-        sw = gi.get("sweep", {})
-        bonus = gi.get("bonus", 0)
-        confirmations = gi.get("confirmations", 0)
-        contradictions = gi.get("contradictions", 0)
+    # ── S/D Gate Engine Panel (ALL symbols) — Gate-Based ───────
+    gv5 = a.get("gold_v5", {})
+    if gv5:
+        v5_signal = gv5.get("signal", "NO_SETUP")
+        v5_dir = gv5.get("direction", "Wait")
+        v5_gates = gv5.get("gates", {})
+        v5_gp = gv5.get("gates_passed", 0)
+        v5_conf = gv5.get("confluence", {})
+        v5_exit = gv5.get("exit_check", {})
+        v5_levels = gv5.get("levels", {})
+        v5_summary = gv5.get("summary", "")
+        v5_bias = gv5.get("h4_bias", {})
+        v5_ar = gv5.get("asian_range", {})
+        v5_confidence = gv5.get("confidence", "LOW")
 
-        # MTF display
-        h4t_g = gi.get("h4_trend", "neutral")
-        h1t_g = gi.get("h1_trend", "neutral")
-        et_g  = gi.get("entry_trend", "neutral")
-        mtf_align = gi.get("mtf_alignment", "unknown")
-        def _tf_col(t): return "#10b981" if "bull" in str(t) else ("#ef4444" if "bear" in str(t) else "#f59e0b")
-        def _tf_icon(t): return "▲" if "bull" in str(t) else ("▼" if "bear" in str(t) else "◈")
-        mtf_col = {"perfect": "#10b981", "good": "#84cc16", "weak": "#f59e0b", "opposed": "#ef4444"}.get(mtf_align, "#8b9ab0")
+        # Signal colors & labels
+        sig_map = {
+            "ENTRY": ("#00d4aa", "🚀 ENTRY NOW"),
+            "CONFIRMED_WAIT_TRIGGER": ("#10b981", "🟢 CONFIRMED — Wait M5"),
+            "SETUP_FORMING": ("#f59e0b", "🟡 SETUP FORMING"),
+            "MONITOR": ("#0ea5e9", "👀 MONITOR"),
+            "NO_SETUP": ("#ef4444", "❌ NO SETUP"),
+            "EXIT": ("#ef4444", "🔴 EXIT NOW")
+        }
+        sig_col, sig_label = sig_map.get(v5_signal, ("#8b9ab0", v5_signal))
 
-        # Zone display (V4: zone_pos is now a dict with freshness info)
-        zone_info = gi.get("zones", {})
-        zone_pos = zone_info.get("position", None)
-        if isinstance(zone_pos, dict):
-            _zt = zone_pos.get("type", "")
-            _zf = "FRESH" if zone_pos.get("fresh") else f"visited {zone_pos.get('visits',0)}x"
-            zone_text = f"{'🔴' if _zt=='supply' else '🟢'} In {_zt.upper()} Zone ({_zf})"
-            zone_col = "#ef4444" if _zt == "supply" else "#10b981"
-        elif isinstance(zone_pos, str):
-            zone_text = {"supply": "🔴 In Supply Zone", "demand": "🟢 In Demand Zone"}.get(zone_pos, "— No zone")
-            zone_col = "#ef4444" if zone_pos == "supply" else ("#10b981" if zone_pos == "demand" else "#8b9ab0")
-        else:
-            zone_text = "— No zone"
-            zone_col = "#8b9ab0"
+        # Gate indicator icons
+        def _gate_icon(n):
+            g = v5_gates.get(n, {})
+            return "✅" if g.get("passed") else "⬜"
 
-        # FVG, CHoCH, Killzone, RSI Div
-        fvg = gi.get("fvg", {})
-        choch = gi.get("choch", {})
-        kz = gi.get("killzone", "Off-hours")
-        rsi_div = gi.get("rsi_divergence", {})
+        # Exit warning
+        exit_html = ""
+        if v5_exit.get("exit_now"):
+            exit_html = (f"<div style='background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.4);"
+                        f"border-radius:6px;padding:8px 10px;margin:6px 0;font-size:11px;color:#ef4444;'>"
+                        f"🚨 <b>EXIT SIGNAL:</b> {v5_exit.get('details','')}</div>")
+        elif v5_exit.get("trail_sl"):
+            exit_html = (f"<div style='background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.3);"
+                        f"border-radius:6px;padding:8px 10px;margin:6px 0;font-size:11px;color:#f59e0b;'>"
+                        f"📐 <b>TRAIL SL:</b> {v5_exit.get('details','')}</div>")
 
-        bo_col = "#10b981" if gi.get("breakout_aligned") else ("#f59e0b" if bo == "inside" else "#8b9ab0")
-        bo_text = {"bull_breakout": "▲ BULL", "bear_breakout": "▼ BEAR",
-                   "inside": "◈ Inside", "invalid": "—", "no_data": "—"}.get(bo, bo)
-        _sw_lvl = f"{sw.get('sweep_level', 0):.2f}"
-        sw_text = f"🏦 {sw['direction'].upper()} @ {_sw_lvl}" if sw.get("detected") else "—"
-        b_col = "#10b981" if bonus > 0 else ("#ef4444" if bonus < 0 else "#8b9ab0")
-        conf_col = "#10b981" if confirmations >= 4 else ("#84cc16" if confirmations >= 2 else "#f59e0b")
-        contra_col = "#ef4444" if contradictions >= 2 else ("#f59e0b" if contradictions >= 1 else "#10b981")
+        # Confluence items
+        conf_items = v5_conf.get("items", [])
+        conf_html = "<span style='color:#6b7280;'>—</span>"
+        if conf_items:
+            conf_html = " · ".join([f"<span style='color:#c7d2fe;'>{c}</span>" for c in conf_items])
+
+        # Levels
+        lvl_html = ""
+        if v5_levels.get("sl"):
+            lvl_html = (
+                f"<div style='display:flex;gap:10px;font-size:11px;margin-top:6px;'>"
+                f"<div><span style='color:#8b9ab0;'>SL: </span><span style='color:#ef4444;font-weight:700;'>{v5_levels['sl']:.2f}</span>"
+                f" <span style='color:#6b7280;font-size:9px;'>({v5_levels.get('sl_pips',0):.0f} pips)</span></div>"
+                f"<div><span style='color:#8b9ab0;'>TP1: </span><span style='color:#10b981;font-weight:700;'>{v5_levels['tp1']:.2f}</span>"
+                f" <span style='color:#6b7280;font-size:9px;'>(R:R {v5_levels.get('rr1',0):.1f})</span></div>"
+                f"<div><span style='color:#8b9ab0;'>TP2: </span><span style='color:#10b981;font-weight:700;'>{v5_levels['tp2']:.2f}</span>"
+                f" <span style='color:#6b7280;font-size:9px;'>(R:R {v5_levels.get('rr2',0):.1f})</span></div>"
+                f"</div>"
+                f"<div style='font-size:9px;color:#6b7280;margin-top:2px;'>SL: {v5_levels.get('sl_type','')} | TP: {v5_levels.get('tp_type','')}</div>"
+            )
+
+        # Zone info
+        zc = gv5.get("zone_check", {})
+        zone_status = zc.get("status", "no_zone") if zc else "no_zone"
+        zone_details = zc.get("details", "") if zc else ""
+        zq = zc.get("quality", 0) if zc else 0
 
         st.markdown(
             f"<div style='background:rgba(255,215,0,0.04);border:1px solid rgba(255,215,0,0.15);"
-            f"border-radius:8px;padding:12px 14px;margin:8px 0;'>"
-            # Title + Score
+            f"border-radius:8px;padding:14px;margin:8px 0;'>"
+            # ── Title + Signal ──
             f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;'>"
             f"<span style='font-size:10px;color:#ffd700;font-family:Space Mono,monospace;"
-            f"letter-spacing:.1em;'>🥇 GOLD ENGINE V2</span>"
-            f"<span style='font-size:12px;font-weight:700;color:{b_col};font-family:Space Mono,monospace;'>"
-            f"{bonus:+d} pts | ✅{confirmations} ❌{contradictions}</span></div>"
-            # Row 1: Multi-Timeframe
+            f"letter-spacing:.1em;'>{'🥇' if norm(symbol)=='XAUUSD' else '📊'} S/D GATE ENGINE</span>"
+            f"<span style='font-size:13px;font-weight:700;color:{sig_col};font-family:Space Mono,monospace;'>"
+            f"{sig_label}</span></div>"
+            # ── Gate Progress Bar ──
             f"<div style='background:rgba(255,255,255,0.03);border-radius:6px;padding:8px 10px;margin-bottom:8px;'>"
-            f"<div style='font-size:9px;color:#8b9ab0;font-family:Space Mono,monospace;letter-spacing:.08em;margin-bottom:6px;'>MULTI-TIMEFRAME ANALYSIS</div>"
-            f"<div style='display:flex;gap:12px;font-size:11px;'>"
-            f"<div><span style='color:#8b9ab0;'>H4: </span><span style='color:{_tf_col(h4t_g)};font-weight:700;'>{_tf_icon(h4t_g)} {h4t_g.upper()}</span></div>"
-            f"<div><span style='color:#8b9ab0;'>H1: </span><span style='color:{_tf_col(h1t_g)};font-weight:700;'>{_tf_icon(h1t_g)} {h1t_g.upper()}</span></div>"
-            f"<div><span style='color:#8b9ab0;'>Entry: </span><span style='color:{_tf_col(et_g)};font-weight:700;'>{_tf_icon(et_g)} {et_g.upper()}</span></div>"
-            f"<div><span style='color:#8b9ab0;'>Align: </span><span style='color:{mtf_col};font-weight:700;'>{mtf_align.upper()}</span></div>"
-            f"</div></div>"
-            # Row 2: Smart Money Modules
-            f"<div style='display:flex;gap:10px;font-size:11px;flex-wrap:wrap;margin-bottom:6px;'>"
-            f"<div><span style='color:#8b9ab0;'>Zone: </span><span style='color:{zone_col};'>{zone_text}</span></div>"
-            f"<div><span style='color:#8b9ab0;'>FVG: </span><span style='color:{'#10b981' if fvg.get('detected') else '#8b9ab0'};'>{'✓ ' + str(fvg.get('type','')) if fvg.get('detected') else '—'}</span></div>"
-            f"<div><span style='color:#8b9ab0;'>CHoCH: </span><span style='color:{'#10b981' if choch.get('detected') else '#8b9ab0'};'>{'✓ ' + str(choch.get('direction','')) if choch.get('detected') else '—'}</span></div>"
-            f"<div><span style='color:#8b9ab0;'>Divergence: </span><span style='color:{'#10b981' if rsi_div.get('detected') else '#8b9ab0'};'>{'✓ ' + str(rsi_div.get('type','')) if rsi_div.get('detected') else '—'}</span></div>"
+            f"<div style='font-size:9px;color:#8b9ab0;font-family:Space Mono,monospace;letter-spacing:.08em;margin-bottom:6px;'>GATE SYSTEM ({v5_gp}/4 passed)</div>"
+            f"<div style='display:flex;gap:6px;font-size:10px;'>"
+            f"<div style='flex:1;background:{'rgba(0,212,170,0.15)' if v5_gates.get(1,{}).get('passed') else 'rgba(255,255,255,0.03)'};border:1px solid {'#00d4aa' if v5_gates.get(1,{}).get('passed') else 'rgba(255,255,255,0.08)'};border-radius:4px;padding:6px;text-align:center;'>"
+            f"<div style='color:{'#00d4aa' if v5_gates.get(1,{}).get('passed') else '#6b7280'};font-weight:700;'>{_gate_icon(1)} G1</div>"
+            f"<div style='color:#8b9ab0;font-size:8px;'>H4 Bias</div>"
             f"</div>"
-            # Row 3: Traditional modules
-            f"<div style='display:flex;gap:10px;font-size:11px;flex-wrap:wrap;'>"
-            f"<div><span style='color:#8b9ab0;'>Killzone: </span><span style='color:#e8edf2;'>{kz}</span></div>"
+            f"<div style='flex:1;background:{'rgba(0,212,170,0.15)' if v5_gates.get(2,{}).get('passed') else 'rgba(255,255,255,0.03)'};border:1px solid {'#00d4aa' if v5_gates.get(2,{}).get('passed') else 'rgba(255,255,255,0.08)'};border-radius:4px;padding:6px;text-align:center;'>"
+            f"<div style='color:{'#00d4aa' if v5_gates.get(2,{}).get('passed') else '#6b7280'};font-weight:700;'>{_gate_icon(2)} G2</div>"
+            f"<div style='color:#8b9ab0;font-size:8px;'>H1 Zone</div>"
+            f"</div>"
+            f"<div style='flex:1;background:{'rgba(0,212,170,0.15)' if v5_gates.get(3,{}).get('passed') else 'rgba(255,255,255,0.03)'};border:1px solid {'#00d4aa' if v5_gates.get(3,{}).get('passed') else 'rgba(255,255,255,0.08)'};border-radius:4px;padding:6px;text-align:center;'>"
+            f"<div style='color:{'#00d4aa' if v5_gates.get(3,{}).get('passed') else '#6b7280'};font-weight:700;'>{_gate_icon(3)} G3</div>"
+            f"<div style='color:#8b9ab0;font-size:8px;'>M15 BOS</div>"
+            f"</div>"
+            f"<div style='flex:1;background:{'rgba(0,212,170,0.15)' if v5_gates.get(4,{}).get('passed') else 'rgba(255,255,255,0.03)'};border:1px solid {'#00d4aa' if v5_gates.get(4,{}).get('passed') else 'rgba(255,255,255,0.08)'};border-radius:4px;padding:6px;text-align:center;'>"
+            f"<div style='color:{'#00d4aa' if v5_gates.get(4,{}).get('passed') else '#6b7280'};font-weight:700;'>{_gate_icon(4)} G4</div>"
+            f"<div style='color:#8b9ab0;font-size:8px;'>M5 Entry</div>"
+            f"</div>"
+            f"</div></div>"
+            # ── Gate Details ──
+            f"<div style='font-size:10px;margin-bottom:8px;'>"
+            f"<div style='color:#8b9ab0;'><b>G1 H4:</b> <span style='color:{'#10b981' if v5_dir=='Buy' else ('#ef4444' if v5_dir=='Sell' else '#f59e0b')};'>"
+            f"{'▲' if v5_dir=='Buy' else ('▼' if v5_dir=='Sell' else '◈')} {v5_dir.upper()}</span>"
+            f" — {v5_bias.get('details','')}</div>"
+            f"<div style='color:#8b9ab0;'><b>G2 Zone:</b> <span style='color:{'#10b981' if zone_status=='at_zone' else ('#0ea5e9' if zone_status=='approaching' else '#6b7280')};'>"
+            f"{zone_details}</span>{(' (Q:' + str(zq) + ')') if zq else ''}</div>"
+            f"<div style='color:#8b9ab0;'><b>G3 M15:</b> <span style='color:{'#10b981' if v5_gates.get(3,{}).get('passed') else '#6b7280'};'>"
+            f"{v5_gates.get(3,{}).get('details','—')}</span></div>"
+            f"<div style='color:#8b9ab0;'><b>G4 M5:</b> <span style='color:{'#10b981' if v5_gates.get(4,{}).get('passed') else '#6b7280'};'>"
+            f"{v5_gates.get(4,{}).get('details','—')}</span></div>"
+            f"</div>"
+            # ── Exit Alert ──
+            f"{exit_html}"
+            # ── Levels ──
+            f"{lvl_html}"
+            # ── Confluence ──
+            f"<div style='font-size:10px;margin-top:8px;'>"
+            f"<span style='color:#8b9ab0;'>Confluence ({v5_conf.get('count',0)}): </span>"
+            f"{conf_html}"
+            f"</div>"
+            # ── Confidence + Asian Range ──
+            f"<div style='display:flex;gap:10px;font-size:10px;margin-top:6px;'>"
+            f"<div><span style='color:#8b9ab0;'>Confidence: </span>"
+            f"<span style='color:{'#10b981' if v5_confidence=='HIGH' else ('#f59e0b' if v5_confidence=='MEDIUM' else '#6b7280')};font-weight:700;'>"
+            f"{v5_confidence}</span></div>"
             f"<div><span style='color:#8b9ab0;'>Asian: </span>"
-            f"<span style='color:#e8edf2;'>{(str(round(ar['low'],2)) + '—' + str(round(ar['high'],2))) if ar.get('valid') else 'N/A'}</span>"
-            f" <span style='color:{bo_col};font-weight:700;'>{bo_text}</span></div>"
-            f"<div><span style='color:#8b9ab0;'>Sweep: </span><span style='color:#e8edf2;'>{sw_text}</span></div>"
-            f"</div></div>",
+            f"<span style='color:#e8edf2;'>{(str(round(v5_ar['low'],2)) + '—' + str(round(v5_ar['high'],2))) if v5_ar.get('valid') else 'N/A'}</span></div>"
+            f"<div><span style='color:#8b9ab0;'>KZ: </span>"
+            f"<span style='color:{'#10b981' if v5_conf.get('kz_active') else '#6b7280'};'>{v5_conf.get('killzone','Off-hours')}</span></div>"
+            f"</div>"
+            f"</div>",
             unsafe_allow_html=True)
+
+        # ── 50% Zone Midpoint Display ──
+        _zm = gv5.get("zone_midpoint", 0)
+        _zmb = gv5.get("zone_midpoint_broken", False)
+        if _zm > 0:
+            _zm_col = "#ef4444" if _zmb else "#10b981"
+            _zm_txt = "BROKEN — structure weakening!" if _zmb else "Holding — structure stable"
+            st.markdown(
+                f"<div style='background:{'rgba(239,68,68,0.1)' if _zmb else 'rgba(16,185,129,0.05)'};"
+                f"border:1px solid {'rgba(239,68,68,0.3)' if _zmb else 'rgba(16,185,129,0.15)'};"
+                f"border-radius:6px;padding:8px 10px;margin:4px 0;font-size:11px;'>"
+                f"<span style='color:#8b9ab0;'>Zone 50% Midpoint: </span>"
+                f"<span style='color:{_zm_col};font-weight:700;'>{_zm:.2f}</span>"
+                f" — <span style='color:{_zm_col};'>{_zm_txt}</span></div>",
+                unsafe_allow_html=True)
+
+        # ── FIRE ALERTS: CHoCH / BOS Against / Zone Midpoint Break ──
+        _alert_key = f"alert_{symbol}_{v5_signal}"
+        if _alert_key not in st.session_state:
+            st.session_state[_alert_key] = False
+
+        if gv5.get("choch_alert") and not st.session_state.get(f"choch_fired_{symbol}"):
+            fire_choch_alert(symbol, v5_dir, "Structure character changed! Consider EXIT.")
+            st.session_state[f"choch_fired_{symbol}"] = True
+            st.markdown(
+                "<div style='background:rgba(239,68,68,0.2);border:2px solid #ef4444;"
+                "border-radius:8px;padding:12px;margin:6px 0;animation:alertpulse 1s infinite;'>"
+                "<div style='font-size:16px;font-weight:700;color:#ef4444;text-align:center;'>"
+                "🚨 CHoCH DETECTED — STRUCTURE CHANGED 🚨</div>"
+                "<div style='font-size:12px;color:#fca5a5;text-align:center;margin-top:4px;'>"
+                "Change of Character against your position. EXIT or REDUCE NOW!</div></div>",
+                unsafe_allow_html=True)
+        elif not gv5.get("choch_alert"):
+            st.session_state[f"choch_fired_{symbol}"] = False
+
+        if gv5.get("bos_against") and not st.session_state.get(f"bos_fired_{symbol}"):
+            fire_bos_exit_alert(symbol, v5_dir, 0)
+            st.session_state[f"bos_fired_{symbol}"] = True
+            st.markdown(
+                "<div style='background:rgba(245,158,11,0.15);border:2px solid #f59e0b;"
+                "border-radius:8px;padding:10px;margin:6px 0;'>"
+                "<div style='font-size:14px;font-weight:700;color:#f59e0b;text-align:center;'>"
+                "⚠️ BOS AGAINST POSITION — Structure Breaking</div></div>",
+                unsafe_allow_html=True)
+        elif not gv5.get("bos_against"):
+            st.session_state[f"bos_fired_{symbol}"] = False
+
+        if _zmb and not st.session_state.get(f"midpoint_fired_{symbol}"):
+            fire_zone_midpoint_alert(symbol, "S/D", v5_dir)
+            st.session_state[f"midpoint_fired_{symbol}"] = True
+        elif not _zmb:
+            st.session_state[f"midpoint_fired_{symbol}"] = False
 
     # ── KPI cards — mobile-friendly 2-row grid ────────────────
     def kpi(lbl, val, col="#e8edf2"):
@@ -3397,15 +4657,20 @@ def page_symbol(symbol):
                           "P&L": f"${p.get('profit',0):+.2f}"})
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
+    # ── VISUAL STRUCTURE CHARTS — Why Buy/Sell ─────────────
     df_plot = a["df"].tail(150)
     trade_active = next((t for t in st.session_state.get("active_trades",[]) if t.get("symbol")==symbol), None)
-    render_price_chart(
-        df_plot, symbol,
-        entry=trade_active["entry"] if trade_active else None,
-        sl=trade_active["sl"] if trade_active else None,
-        tp1=trade_active.get("tp1") if trade_active else a["tp1"],
-        tp2=trade_active.get("tp2") if trade_active else a["tp2"],
-        title=f"{symbol} {int_label}")
+    chart_tab1, chart_tab2 = st.tabs(["📐 Structure Analysis (H4→H1→M15→M5)", "📊 Classic Chart"])
+    with chart_tab1:
+        render_stacked_structure_charts(a, symbol)
+    with chart_tab2:
+        render_price_chart(
+            df_plot, symbol,
+            entry=trade_active["entry"] if trade_active else None,
+            sl=trade_active["sl"] if trade_active else None,
+            tp1=trade_active.get("tp1") if trade_active else a["tp1"],
+            tp2=trade_active.get("tp2") if trade_active else a["tp2"],
+            title=f"{symbol} {int_label}")
 
     # ── Below chart: 2-column layout (better on mobile) ───────
     col_l, col_r = st.columns([1, 1])
@@ -3517,7 +4782,31 @@ def page_trades():
     # ── Journal ───────────────────────────────────────────────
     st.markdown("---")
     st.markdown("<div class='mono-title' style='font-size:12px;'>TRADE JOURNAL</div>", unsafe_allow_html=True)
-    journal = load_journal()
+    # Load from Supabase first, fall back to local JSON
+    journal = []
+    if _sb_ok():
+        db_journal = sb_get("journal", "order=opened_at.desc")
+        if db_journal:
+            # Normalize DB journal format to match local format
+            for dj in db_journal:
+                journal.append({
+                    "id": dj.get("id", "?")[:6] if dj.get("id") else dj.get("mt5_ticket", "?")[:6],
+                    "ts": dj.get("closed_at") or dj.get("opened_at", ""),
+                    "symbol": dj.get("symbol", "?"),
+                    "direction": dj.get("direction", "?"),
+                    "entry": dj.get("entry", 0),
+                    "sl": dj.get("sl", 0),
+                    "exit": dj.get("exit_price", 0),
+                    "lot": dj.get("lot", 0.01),
+                    "result": dj.get("outcome", "?"),
+                    "pnl_r": dj.get("pnl_r", 0),
+                    "grade": dj.get("grade", "?"),
+                    "score": dj.get("score", 0),
+                    "session": dj.get("session", "?"),
+                    "notes": dj.get("notes", ""),
+                })
+    if not journal:
+        journal = load_journal()
     stats   = journal_stats(journal)
 
     if stats:
@@ -3568,6 +4857,12 @@ def page_trades():
             if sess_data:
                 sd2 = pd.DataFrame([{"Session":se,"Trades":len(v),"Avg R":sum(v)/len(v)} for se,v in sess_data.items()])
                 st.dataframe(sd2, use_container_width=True, hide_index=True)
+
+    # ── Trade Intelligence — Learn from Wins & Losses ──
+    if journal and len(journal) >= 3:
+        st.markdown("---")
+        trade_insights = analyze_trade_patterns(journal)
+        render_trade_insights(trade_insights)
 
     # Full log table
     if journal:
@@ -4295,14 +5590,22 @@ def render_sidebar():
 def main():
     page = render_sidebar()
 
-    # ── Auto-sync MT5 positions to DB on every page load ──────
-    if _sb_ok() and get_ma_token() and get_ma_account():
-        if not st.session_state.get("_mt5_synced_this_run"):
+    # ── Load trades from DB on session start ──────────────────
+    if _sb_ok() and not st.session_state.get("_db_trades_loaded"):
+        if get_ma_token() and get_ma_account():
             with st.spinner("🔄 Syncing MT5 positions…"):
                 db_trades = sync_mt5_to_db()
-            # Merge DB trades into session state for UI compatibility
-            st.session_state["active_trades"] = db_trades
-            st.session_state["_mt5_synced_this_run"] = True
+        else:
+            db_trades = sb_get("trades")
+        # Merge DB trades with any session-state trades (de-dup by id)
+        existing_ids = {t.get("id") for t in st.session_state.get("active_trades", [])}
+        merged = list(st.session_state.get("active_trades", []))
+        for dt in db_trades:
+            if dt.get("id") not in existing_ids:
+                merged.append(dt)
+        st.session_state["active_trades"] = merged
+        st.session_state["_db_trades_loaded"] = True
+        st.session_state["_mt5_synced_this_run"] = True
 
     if page == "🏠  Overview":
         page_overview()

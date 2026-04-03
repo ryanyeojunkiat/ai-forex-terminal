@@ -3426,7 +3426,7 @@ def log_trade(trade, exit_price, result, notes=""):
     dir_   = trade["direction"]
     move   = (ex-entry) if dir_=="Buy" else (entry-ex)
     pnl_r  = round(move/risk,2) if risk > 0 else 0
-    j.append({
+    record = {
         "id": trade.get("id","?")[:6],
         "ts": pd.Timestamp.utcnow().isoformat()[:16],
         "symbol": trade.get("symbol","?"),
@@ -3437,7 +3437,22 @@ def log_trade(trade, exit_price, result, notes=""):
         "score": trade.get("locked_score",0),
         "session": trade.get("session","?"),
         "notes": notes,
-    })
+    }
+    # ── Capture analysis context for learning ──
+    ctx = trade.get("context", {})
+    if ctx:
+        record["gates_passed"] = ctx.get("gates_passed", 0)
+        record["signal"] = ctx.get("signal", "")
+        record["confidence"] = ctx.get("confidence", "")
+        record["h4_bias"] = ctx.get("h4_bias", "")
+        record["zone_status"] = ctx.get("zone_status", "")
+        record["zone_quality"] = ctx.get("zone_quality", 0)
+        record["zone_fresh"] = ctx.get("zone_fresh", False)
+        record["m15_signal"] = ctx.get("m15_signal", "")
+        record["m5_trigger"] = ctx.get("m5_trigger", "")
+        record["confluence"] = ctx.get("confluence_items", "")
+        record["killzone"] = ctx.get("killzone", "")
+    j.append(record)
     save_journal(j)
     return j
 
@@ -3523,6 +3538,387 @@ def render_score_breakdown(bd, score, grade):
                  f"<span style='color:{bar_col};width:28px;text-align:right;font-family:Space Mono,monospace;'>{v}</span></div>")
     html += f"<div style='height:4px;background:#131a22;border-radius:2px;margin-top:8px;overflow:hidden;'><div style='width:{score}%;height:100%;background:{gc};border-radius:2px;'></div></div></div>"
     st.markdown(html, unsafe_allow_html=True)
+
+# ============================================================
+# VISUAL STRUCTURE CHARTS — S/D Zones + Swings + BOS/CHoCH
+# ============================================================
+def _detect_visual_swings(df, pivot_len=2):
+    """Detect swing highs/lows with time+price coordinates for chart drawing."""
+    swings = {"highs": [], "lows": []}
+    if df is None or len(df) < pivot_len * 2 + 1:
+        return swings
+    for i in range(pivot_len, len(df) - pivot_len):
+        h = float(df.iloc[i]["high"]); l = float(df.iloc[i]["low"])
+        t = df.iloc[i]["time"] if "time" in df.columns else i
+        is_sh = all(h >= float(df.iloc[i - j]["high"]) for j in range(1, pivot_len + 1)) and \
+                all(h >= float(df.iloc[i + j]["high"]) for j in range(1, pivot_len + 1))
+        is_sl = all(l <= float(df.iloc[i - j]["low"]) for j in range(1, pivot_len + 1)) and \
+                all(l <= float(df.iloc[i + j]["low"]) for j in range(1, pivot_len + 1))
+        if is_sh:
+            swings["highs"].append({"price": h, "time": t, "idx": i})
+        if is_sl:
+            swings["lows"].append({"price": l, "time": t, "idx": i})
+    return swings
+
+
+def _detect_visual_bos_choch(df, swings):
+    """Detect BOS/CHoCH events with chart coordinates for drawing."""
+    events = []
+    shs = swings["highs"]; sls = swings["lows"]
+    if len(shs) < 2 or len(sls) < 2:
+        return events
+    # Walk through swing pairs to find all BOS/CHoCH in visible range
+    sh_pairs = list(zip(shs[:-1], shs[1:]))
+    sl_pairs = list(zip(sls[:-1], sls[1:]))
+    # Track recent swing context for CHoCH detection
+    for k in range(max(len(sh_pairs), len(sl_pairs))):
+        if k < len(sh_pairs):
+            prev_sh, last_sh = sh_pairs[k]
+            # Find candle that broke this swing high
+            for i in range(last_sh["idx"] + 1, len(df)):
+                c = float(df.iloc[i]["close"])
+                t = df.iloc[i]["time"] if "time" in df.columns else i
+                if c > last_sh["price"]:
+                    # Is it BOS (HH continuation) or CHoCH (reversal from LL)?
+                    # Check if lows were making LL before this break
+                    recent_sls = [s for s in sls if s["idx"] < i]
+                    is_choch = (len(recent_sls) >= 2 and
+                                recent_sls[-1]["price"] < recent_sls[-2]["price"])
+                    is_bos = last_sh["price"] > prev_sh["price"]
+                    if is_choch and not is_bos:
+                        events.append({"type": "CHoCH", "direction": "bullish",
+                                       "price": last_sh["price"], "time": t,
+                                       "from_time": last_sh["time"], "label": "CHoCH"})
+                    elif is_bos:
+                        events.append({"type": "BOS", "direction": "bullish",
+                                       "price": last_sh["price"], "time": t,
+                                       "from_time": last_sh["time"], "label": "BOS"})
+                    break
+        if k < len(sl_pairs):
+            prev_sl, last_sl = sl_pairs[k]
+            for i in range(last_sl["idx"] + 1, len(df)):
+                c = float(df.iloc[i]["close"])
+                t = df.iloc[i]["time"] if "time" in df.columns else i
+                if c < last_sl["price"]:
+                    recent_shs = [s for s in shs if s["idx"] < i]
+                    is_choch = (len(recent_shs) >= 2 and
+                                recent_shs[-1]["price"] > recent_shs[-2]["price"])
+                    is_bos = last_sl["price"] < prev_sl["price"]
+                    if is_choch and not is_bos:
+                        events.append({"type": "CHoCH", "direction": "bearish",
+                                       "price": last_sl["price"], "time": t,
+                                       "from_time": last_sl["time"], "label": "CHoCH"})
+                    elif is_bos:
+                        events.append({"type": "BOS", "direction": "bearish",
+                                       "price": last_sl["price"], "time": t,
+                                       "from_time": last_sl["time"], "label": "BOS"})
+                    break
+    return events
+
+
+def render_structure_chart(df, timeframe, zones=None, symbol="", direction=None,
+                           levels=None, height=280, show_indicators=False):
+    """Render annotated candlestick chart with S/D zones, swings, BOS/CHoCH, 50% midpoint."""
+    if df is None or len(df) < 10:
+        return None
+    fig = go.Figure()
+    # ── Candlestick ──
+    fig.add_trace(go.Candlestick(
+        x=df["time"], open=df["open"], high=df["high"],
+        low=df["low"], close=df["close"], name="Price",
+        increasing_line_color="#10b981", decreasing_line_color="#ef4444"))
+    # ── EMAs ──
+    for col_, c_ in [("ema20", "#f59e0b"), ("ema50", "#8b5cf6"), ("ema200", "#3b82f6")]:
+        if col_ in df.columns:
+            fig.add_trace(go.Scatter(x=df["time"], y=df[col_], name=col_.upper(),
+                                     line=dict(color=c_, width=1), opacity=0.5, showlegend=False))
+    # ── S/D Zones as rectangles ──
+    if zones:
+        t_start = df.iloc[0]["time"]; t_end = df.iloc[-1]["time"]
+        for z in zones.get("supply", []):
+            fig.add_shape(type="rect", x0=t_start, x1=t_end, y0=z["low"], y1=z["high"],
+                          fillcolor="rgba(239,68,68,0.10)", line=dict(color="rgba(239,68,68,0.5)", width=1))
+            _fr = "FRESH" if z.get("fresh") else ("1st" if z.get("first_visit") else "")
+            fig.add_annotation(x=t_end, y=z["high"], text=f"Supply {_fr} Q:{z.get('quality', 0)}",
+                               showarrow=False, font=dict(size=8, color="#ef4444"),
+                               xanchor="right", yanchor="bottom", bgcolor="rgba(0,0,0,0.6)")
+            # 50% midpoint
+            fig.add_shape(type="line", x0=t_start, x1=t_end, y0=z["midpoint"], y1=z["midpoint"],
+                          line=dict(color="rgba(239,68,68,0.4)", width=1, dash="dot"))
+            fig.add_annotation(x=t_start, y=z["midpoint"], text="50%",
+                               showarrow=False, font=dict(size=7, color="#ef4444"),
+                               xanchor="left", yanchor="middle", bgcolor="rgba(0,0,0,0.5)")
+        for z in zones.get("demand", []):
+            fig.add_shape(type="rect", x0=t_start, x1=t_end, y0=z["low"], y1=z["high"],
+                          fillcolor="rgba(16,185,129,0.10)", line=dict(color="rgba(16,185,129,0.5)", width=1))
+            _fr = "FRESH" if z.get("fresh") else ("1st" if z.get("first_visit") else "")
+            fig.add_annotation(x=t_end, y=z["low"], text=f"Demand {_fr} Q:{z.get('quality', 0)}",
+                               showarrow=False, font=dict(size=8, color="#10b981"),
+                               xanchor="right", yanchor="top", bgcolor="rgba(0,0,0,0.6)")
+            fig.add_shape(type="line", x0=t_start, x1=t_end, y0=z["midpoint"], y1=z["midpoint"],
+                          line=dict(color="rgba(16,185,129,0.4)", width=1, dash="dot"))
+            fig.add_annotation(x=t_start, y=z["midpoint"], text="50%",
+                               showarrow=False, font=dict(size=7, color="#10b981"),
+                               xanchor="left", yanchor="middle", bgcolor="rgba(0,0,0,0.5)")
+    # ── Swing Points ──
+    pivot_len = 4 if timeframe == "H4" else (3 if timeframe == "H1" else 2)
+    swings = _detect_visual_swings(df, pivot_len)
+    if swings["highs"]:
+        fig.add_trace(go.Scatter(
+            x=[s["time"] for s in swings["highs"]], y=[s["price"] for s in swings["highs"]],
+            mode="markers+text", name="SH", marker=dict(symbol="triangle-down", size=7, color="#ef4444"),
+            text=["HH" if i > 0 and s["price"] > swings["highs"][i-1]["price"] else
+                  ("LH" if i > 0 else "SH") for i, s in enumerate(swings["highs"])],
+            textposition="top center", textfont=dict(size=7, color="#ef4444"), showlegend=False))
+    if swings["lows"]:
+        fig.add_trace(go.Scatter(
+            x=[s["time"] for s in swings["lows"]], y=[s["price"] for s in swings["lows"]],
+            mode="markers+text", name="SL", marker=dict(symbol="triangle-up", size=7, color="#10b981"),
+            text=["HL" if i > 0 and s["price"] > swings["lows"][i-1]["price"] else
+                  ("LL" if i > 0 else "SL") for i, s in enumerate(swings["lows"])],
+            textposition="bottom center", textfont=dict(size=7, color="#10b981"), showlegend=False))
+    # ── Structure lines connecting swings ──
+    if len(swings["highs"]) >= 2:
+        fig.add_trace(go.Scatter(
+            x=[s["time"] for s in swings["highs"]], y=[s["price"] for s in swings["highs"]],
+            mode="lines", line=dict(color="rgba(239,68,68,0.25)", width=1, dash="dash"), showlegend=False))
+    if len(swings["lows"]) >= 2:
+        fig.add_trace(go.Scatter(
+            x=[s["time"] for s in swings["lows"]], y=[s["price"] for s in swings["lows"]],
+            mode="lines", line=dict(color="rgba(16,185,129,0.25)", width=1, dash="dash"), showlegend=False))
+    # ── BOS/CHoCH Events ──
+    events = _detect_visual_bos_choch(df, swings)
+    for ev in events:
+        is_choch = ev["type"] == "CHoCH"
+        bull = ev["direction"] == "bullish"
+        color = "#ff4444" if is_choch else ("#10b981" if bull else "#ef4444")
+        lw = 2.5 if is_choch else 1.5
+        fig.add_shape(type="line", x0=ev["from_time"], x1=ev["time"], y0=ev["price"], y1=ev["price"],
+                      line=dict(color=color, width=lw, dash="solid" if is_choch else "dash"))
+        arrow_y = ev["price"] * (1.001 if bull else 0.999)
+        label_text = ev["label"] + (" ↑" if bull else " ↓")
+        fig.add_annotation(
+            x=ev["time"], y=arrow_y, text=label_text,
+            showarrow=True, arrowhead=2, arrowsize=1.2, arrowcolor=color,
+            font=dict(size=10 if is_choch else 8, color="#ffffff" if is_choch else color,
+                      family="Space Mono"),
+            bgcolor="#cc0000" if is_choch else "rgba(0,0,0,0.6)",
+            bordercolor=color, borderwidth=2 if is_choch else 1, borderpad=3)
+    # ── Entry / SL / TP levels ──
+    if levels and timeframe in ("M15", "M5"):
+        if levels.get("sl"):
+            fig.add_hline(y=levels["sl"], line_color="#ef4444", line_dash="dash", line_width=1,
+                          annotation_text="SL", annotation_font_color="#ef4444", annotation_font_size=9,
+                          annotation_position="bottom right")
+        if levels.get("tp1"):
+            fig.add_hline(y=levels["tp1"], line_color="#10b981", line_dash="dash", line_width=1,
+                          annotation_text="TP1", annotation_font_color="#10b981", annotation_font_size=9,
+                          annotation_position="top right")
+        if levels.get("tp2"):
+            fig.add_hline(y=levels["tp2"], line_color="#84cc16", line_dash="dot", line_width=1,
+                          annotation_text="TP2", annotation_font_color="#84cc16", annotation_font_size=9,
+                          annotation_position="top right")
+    # ── Layout ──
+    tf_colors = {"H4": "#3b82f6", "H1": "#8b5cf6", "M15": "#f59e0b", "M5": "#10b981"}
+    tf_col = tf_colors.get(timeframe, "#8b9ab0")
+    _dir_icon = "▲" if direction == "Buy" else ("▼" if direction == "Sell" else "—")
+    _dir_col = "#10b981" if direction == "Buy" else ("#ef4444" if direction == "Sell" else "#8b9ab0")
+    fig.update_layout(
+        title=dict(text=f"<span style='color:{tf_col}'>{timeframe}</span>  "
+                        f"<span style='color:{_dir_col}'>{_dir_icon}</span>  {symbol}",
+                   font=dict(size=12, family="Space Mono")),
+        paper_bgcolor="#080c10", plot_bgcolor="#080c10",
+        font=dict(color="#e8edf2", size=10), height=height,
+        xaxis_rangeslider_visible=False, showlegend=False,
+        margin=dict(l=0, r=0, t=30, b=0),
+        xaxis=dict(gridcolor="rgba(255,255,255,0.03)"),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.05)", side="right"))
+    return fig
+
+
+def render_stacked_structure_charts(a, symbol):
+    """Render H4 → H1 → M15 → M5 stacked structure charts with annotations."""
+    gv5 = a.get("gold_v5", {})
+    zones = gv5.get("zones", {})
+    v5_dir = gv5.get("direction", a.get("direction", "Wait"))
+    levels = gv5.get("levels", {})
+    gates = gv5.get("gates", {})
+    # ── Structure break warning banner ──
+    exit_check = gv5.get("exit_check", {})
+    if exit_check.get("exit_now"):
+        st.markdown(
+            "<div style='background:rgba(255,0,0,0.2);border:2px solid #ff0000;"
+            "border-radius:8px;padding:12px;margin:8px 0;animation:alertpulse 1s infinite;'>"
+            "<div style='font-size:16px;font-weight:900;color:#ff4444;text-align:center;"
+            "font-family:Space Mono,monospace;'>STRUCTURE BROKEN — STOP LOSS NOW</div>"
+            "<div style='font-size:11px;color:#fca5a5;text-align:center;margin-top:4px;'>"
+            + str(exit_check.get('details', 'M15 BOS against your position — EXIT IMMEDIATELY'))
+            + "</div></div>", unsafe_allow_html=True)
+    if gv5.get("choch_alert"):
+        st.markdown(
+            "<div style='background:rgba(255,0,0,0.25);border:2px solid #ff0000;"
+            "border-radius:8px;padding:12px;margin:8px 0;animation:alertpulse 0.8s infinite;'>"
+            "<div style='font-size:16px;font-weight:900;color:#ff0000;text-align:center;"
+            "font-family:Space Mono,monospace;'>CHoCH DETECTED — STRUCTURE CHANGED</div>"
+            "<div style='font-size:11px;color:#fca5a5;text-align:center;margin-top:4px;'>"
+            "Change of Character against your position. Close trade immediately!</div></div>",
+            unsafe_allow_html=True)
+    # ── Chart configs per timeframe ──
+    charts = [
+        {"tf": "H4", "df": a.get("df_h4"), "bars": 80, "h": 240,
+         "gate": gates.get(1, {}), "gate_name": "G1: H4 Bias", "zones": None},
+        {"tf": "H1", "df": a.get("df_h1"), "bars": 120, "h": 260,
+         "gate": gates.get(2, {}), "gate_name": "G2: H1 Zone", "zones": zones},
+        {"tf": "M15", "df": a.get("df_m15"), "bars": 100, "h": 260,
+         "gate": gates.get(3, {}), "gate_name": "G3: M15 Confirm", "zones": zones},
+        {"tf": "M5", "df": a.get("df_m5"), "bars": 60, "h": 240,
+         "gate": gates.get(4, {}), "gate_name": "G4: M5 Trigger", "zones": zones},
+    ]
+    for ch in charts:
+        df_tf = ch["df"]
+        if df_tf is None or len(df_tf) < 10:
+            st.markdown(f"<div style='color:#4a5568;font-size:11px;padding:4px 0;'>"
+                        f"{ch['tf']}: No data</div>", unsafe_allow_html=True)
+            continue
+        df_plot = df_tf.tail(ch["bars"])
+        # Gate status badge
+        g_passed = ch["gate"].get("passed", False)
+        g_detail = ch["gate"].get("details", "—")
+        g_color = "#10b981" if g_passed else "#ef4444"
+        g_icon = "✅" if g_passed else "❌"
+        st.markdown(
+            f"<div style='display:flex;align-items:center;gap:8px;margin:10px 0 2px;'>"
+            f"<span style='font-size:11px;font-family:Space Mono,monospace;"
+            f"color:{g_color};font-weight:700;'>{g_icon} {ch['gate_name']}</span>"
+            f"<span style='font-size:10px;color:#8b9ab0;'>{g_detail}</span></div>",
+            unsafe_allow_html=True)
+        # Render chart
+        fig = render_structure_chart(
+            df_plot, ch["tf"], zones=ch["zones"], symbol=symbol,
+            direction=v5_dir, levels=levels, height=ch["h"])
+        if fig:
+            st.plotly_chart(fig, use_container_width=True, key=f"struct_{symbol}_{ch['tf']}")
+
+
+# ============================================================
+# TRADE PERFORMANCE LEARNING ENGINE
+# ============================================================
+def analyze_trade_patterns(journal_data):
+    """Analyze win/loss patterns from trade history. Returns insights dict."""
+    if not journal_data or len(journal_data) < 3:
+        return None
+    insights = {"total": len(journal_data), "patterns": [], "recommendations": []}
+    wins = [t for t in journal_data if t.get("result") in ("Win", "WIN")]
+    losses = [t for t in journal_data if t.get("result") in ("Loss", "LOSS")]
+    insights["win_rate"] = len(wins) / len(journal_data) * 100 if journal_data else 0
+    insights["avg_win_r"] = sum(t.get("pnl_r", 0) for t in wins) / len(wins) if wins else 0
+    insights["avg_loss_r"] = sum(t.get("pnl_r", 0) for t in losses) / len(losses) if losses else 0
+    # ── Pattern 1: Win rate by grade ──
+    grade_stats = {}
+    for t in journal_data:
+        g = t.get("grade") or t.get("locked_grade") or "?"
+        grade_stats.setdefault(g, {"wins": 0, "losses": 0, "total": 0})
+        grade_stats[g]["total"] += 1
+        if t.get("result") in ("Win", "WIN"):
+            grade_stats[g]["wins"] += 1
+        elif t.get("result") in ("Loss", "LOSS"):
+            grade_stats[g]["losses"] += 1
+    insights["by_grade"] = grade_stats
+    for g, s in grade_stats.items():
+        wr = s["wins"] / s["total"] * 100 if s["total"] else 0
+        if s["total"] >= 3 and wr < 40:
+            insights["recommendations"].append(
+                f"Avoid grade {g} trades — only {wr:.0f}% win rate over {s['total']} trades")
+        if s["total"] >= 3 and wr >= 70:
+            insights["patterns"].append(
+                f"Grade {g} trades are your sweet spot — {wr:.0f}% win rate")
+    # ── Pattern 2: Win rate by symbol ──
+    sym_stats = {}
+    for t in journal_data:
+        s = t.get("symbol", "?")
+        sym_stats.setdefault(s, {"wins": 0, "losses": 0, "total": 0, "pnl": 0})
+        sym_stats[s]["total"] += 1
+        sym_stats[s]["pnl"] += t.get("pnl_r", 0)
+        if t.get("result") in ("Win", "WIN"):
+            sym_stats[s]["wins"] += 1
+        elif t.get("result") in ("Loss", "LOSS"):
+            sym_stats[s]["losses"] += 1
+    insights["by_symbol"] = sym_stats
+    for s, st_ in sym_stats.items():
+        wr = st_["wins"] / st_["total"] * 100 if st_["total"] else 0
+        if st_["total"] >= 3 and st_["pnl"] < -2:
+            insights["recommendations"].append(
+                f"Stop trading {s} — net {st_['pnl']:+.1f}R loss over {st_['total']} trades")
+        if st_["total"] >= 3 and wr >= 65:
+            insights["patterns"].append(f"{s} is profitable — {wr:.0f}% win rate, {st_['pnl']:+.1f}R total")
+    # ── Pattern 3: Win rate by session/killzone ──
+    sess_stats = {}
+    for t in journal_data:
+        se = t.get("session") or t.get("killzone") or "?"
+        sess_stats.setdefault(se, {"wins": 0, "losses": 0, "total": 0})
+        sess_stats[se]["total"] += 1
+        if t.get("result") in ("Win", "WIN"):
+            sess_stats[se]["wins"] += 1
+        elif t.get("result") in ("Loss", "LOSS"):
+            sess_stats[se]["losses"] += 1
+    insights["by_session"] = sess_stats
+    for se, s in sess_stats.items():
+        wr = s["wins"] / s["total"] * 100 if s["total"] else 0
+        if s["total"] >= 3 and wr < 35:
+            insights["recommendations"].append(
+                f"Avoid trading during {se} — only {wr:.0f}% win rate")
+    # ── Pattern 4: Consecutive losses ──
+    max_streak = 0; curr_streak = 0
+    for t in journal_data:
+        if t.get("result") in ("Loss", "LOSS"):
+            curr_streak += 1; max_streak = max(max_streak, curr_streak)
+        else:
+            curr_streak = 0
+    if max_streak >= 3:
+        insights["recommendations"].append(
+            f"You had a {max_streak}-loss streak. Consider taking a break after 3 consecutive losses.")
+    insights["max_loss_streak"] = max_streak
+    # ── Pattern 5: Risk/reward analysis ──
+    if wins and losses:
+        avg_win = insights["avg_win_r"]; avg_loss = abs(insights["avg_loss_r"])
+        if avg_loss > 0 and avg_win / avg_loss < 1.5:
+            insights["recommendations"].append(
+                f"Your avg win ({avg_win:.1f}R) is too close to avg loss ({avg_loss:.1f}R). "
+                f"Aim for 2:1+ R:R or improve entry precision.")
+    return insights
+
+
+def render_trade_insights(insights):
+    """Render trade pattern analysis as UI cards."""
+    if not insights:
+        return
+    st.markdown("<div class='mono-title' style='font-size:12px;margin-top:16px;'>"
+                "TRADE INTELLIGENCE — LEARNING FROM YOUR HISTORY</div>", unsafe_allow_html=True)
+    # Summary metrics
+    wr = insights.get("win_rate", 0)
+    wr_col = "#10b981" if wr >= 60 else ("#f59e0b" if wr >= 45 else "#ef4444")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Win Rate", f"{wr:.0f}%")
+    c2.metric("Avg Win", f"{insights.get('avg_win_r', 0):+.1f}R")
+    c3.metric("Avg Loss", f"{insights.get('avg_loss_r', 0):.1f}R")
+    c4.metric("Max Loss Streak", insights.get("max_loss_streak", 0))
+    # Winning patterns
+    if insights.get("patterns"):
+        html = "<div style='background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.3);border-radius:8px;padding:10px 14px;margin:6px 0;'>"
+        html += "<div style='font-size:11px;color:#10b981;font-weight:700;font-family:Space Mono,monospace;margin-bottom:6px;'>YOUR WINNING PATTERNS</div>"
+        for p in insights["patterns"]:
+            html += f"<div style='font-size:11px;color:#6ee7b7;padding:2px 0;'>✅ {p}</div>"
+        html += "</div>"
+        st.markdown(html, unsafe_allow_html=True)
+    # Recommendations (things to fix)
+    if insights.get("recommendations"):
+        html = "<div style='background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:10px 14px;margin:6px 0;'>"
+        html += "<div style='font-size:11px;color:#ef4444;font-weight:700;font-family:Space Mono,monospace;margin-bottom:6px;'>AREAS TO IMPROVE</div>"
+        for r in insights["recommendations"]:
+            html += f"<div style='font-size:11px;color:#fca5a5;padding:2px 0;'>⚠ {r}</div>"
+        html += "</div>"
+        st.markdown(html, unsafe_allow_html=True)
+
 
 def render_price_chart(df, symbol, entry=None, sl=None, tp1=None, tp2=None, title="PRICE CHART"):
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
@@ -3627,11 +4023,44 @@ def render_trade_tracker(symbol, current_price, a=None, td_key=""):
                 grade_lock = a.get("grade","?") if a else "?"
                 score_lock = a.get("score",0)   if a else 0
                 sess_lock  = a.get("session","?") if a else "?"
-                st.session_state.active_trades.append({
-                    "id": str(uuid.uuid4())[:8], "symbol": symbol,
+                trade_id = str(uuid.uuid4())[:8]
+                # ── Capture full analysis context for learning ──
+                _gv5 = a.get("gold_v5", {}) if a else {}
+                _ctx = {}
+                if _gv5:
+                    _ctx = {
+                        "gates_passed": _gv5.get("gates_passed", 0),
+                        "signal": _gv5.get("signal", ""),
+                        "confidence": _gv5.get("confidence", ""),
+                        "h4_bias": _gv5.get("h4_bias", {}).get("trend", ""),
+                        "h4_strength": _gv5.get("h4_bias", {}).get("strength", ""),
+                        "zone_status": _gv5.get("zone_check", {}).get("status", ""),
+                        "zone_quality": _gv5.get("zone_check", {}).get("quality", 0),
+                        "zone_fresh": _gv5.get("zone_check", {}).get("zone", {}).get("fresh", False) if _gv5.get("zone_check", {}).get("zone") else False,
+                        "m15_signal": _gv5.get("m15_confirm", {}).get("signal", ""),
+                        "m5_trigger": _gv5.get("m5_trigger", {}).get("type", ""),
+                        "confluence_count": _gv5.get("confluence", {}).get("count", 0),
+                        "confluence_items": ",".join(_gv5.get("confluence", {}).get("items", [])),
+                        "killzone": _gv5.get("confluence", {}).get("killzone", ""),
+                        "midpoint_broken": _gv5.get("zone_midpoint_broken", False),
+                    }
+                trade_data = {
+                    "id": trade_id, "symbol": symbol,
                     "entry":me,"sl":ms,"direction":md,"lot":ml,"tp1":mt1,"tp2":mt2,
                     "locked_grade":grade_lock,"locked_score":score_lock,"session":sess_lock,
-                })
+                    "context": _ctx, "opened_at": pd.Timestamp.utcnow().isoformat(),
+                }
+                st.session_state.active_trades.append(trade_data)
+                # ── Persist to Supabase so trades survive logout ──
+                if _sb_ok():
+                    sb_upsert("trades", {
+                        "id": trade_id, "symbol": symbol,
+                        "direction": md, "entry": float(me), "sl": float(ms),
+                        "tp1": float(mt1), "tp2": float(mt2),
+                        "lot": float(ml), "locked_grade": grade_lock,
+                        "locked_score": int(score_lock),
+                        "opened_at": pd.Timestamp.utcnow().isoformat(),
+                    })
                 st.success(f"Trade entered: {symbol} {md}"); st.rerun()
 
     # ── Active trade cards ──
@@ -3745,6 +4174,23 @@ def render_trade_tracker(symbol, current_price, a=None, td_key=""):
                 cc1,cc2 = st.columns(2)
                 if cc1.button("💾 Save & Close", key=f"btn_sc_{tid}"):
                     log_trade(t, ep, res, note)
+                    # ── Persist closed trade to Supabase journal ──
+                    if _sb_ok():
+                        _entry = float(t["entry"]); _sl = float(t["sl"]); _ex = float(ep)
+                        _risk = abs(_entry - _sl)
+                        _move = (_ex - _entry) if t["direction"] == "Buy" else (_entry - _ex)
+                        _pnl_r = round(_move / _risk, 2) if _risk > 0 else 0
+                        sb_insert("journal", {
+                            "symbol": t.get("symbol"), "direction": t["direction"],
+                            "entry": _entry, "exit_price": _ex, "sl": _sl,
+                            "tp1": t.get("tp1"), "tp2": t.get("tp2"),
+                            "lot": t.get("lot", 0.01), "pnl_r": _pnl_r,
+                            "outcome": res, "grade": t.get("locked_grade"),
+                            "score": int(t.get("locked_score", 0)),
+                            "notes": note,
+                            "opened_at": t.get("opened_at", pd.Timestamp.utcnow().isoformat()),
+                        })
+                        sb_delete("trades", f"id=eq.{tid}")
                     st.session_state.active_trades = [x for x in st.session_state.active_trades if x.get("id")!=tid]
                     st.session_state.pop(ck,None)
                     st.success("Trade logged!"); st.rerun()
@@ -4211,15 +4657,20 @@ def page_symbol(symbol):
                           "P&L": f"${p.get('profit',0):+.2f}"})
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
+    # ── VISUAL STRUCTURE CHARTS — Why Buy/Sell ─────────────
     df_plot = a["df"].tail(150)
     trade_active = next((t for t in st.session_state.get("active_trades",[]) if t.get("symbol")==symbol), None)
-    render_price_chart(
-        df_plot, symbol,
-        entry=trade_active["entry"] if trade_active else None,
-        sl=trade_active["sl"] if trade_active else None,
-        tp1=trade_active.get("tp1") if trade_active else a["tp1"],
-        tp2=trade_active.get("tp2") if trade_active else a["tp2"],
-        title=f"{symbol} {int_label}")
+    chart_tab1, chart_tab2 = st.tabs(["📐 Structure Analysis (H4→H1→M15→M5)", "📊 Classic Chart"])
+    with chart_tab1:
+        render_stacked_structure_charts(a, symbol)
+    with chart_tab2:
+        render_price_chart(
+            df_plot, symbol,
+            entry=trade_active["entry"] if trade_active else None,
+            sl=trade_active["sl"] if trade_active else None,
+            tp1=trade_active.get("tp1") if trade_active else a["tp1"],
+            tp2=trade_active.get("tp2") if trade_active else a["tp2"],
+            title=f"{symbol} {int_label}")
 
     # ── Below chart: 2-column layout (better on mobile) ───────
     col_l, col_r = st.columns([1, 1])
@@ -4331,7 +4782,31 @@ def page_trades():
     # ── Journal ───────────────────────────────────────────────
     st.markdown("---")
     st.markdown("<div class='mono-title' style='font-size:12px;'>TRADE JOURNAL</div>", unsafe_allow_html=True)
-    journal = load_journal()
+    # Load from Supabase first, fall back to local JSON
+    journal = []
+    if _sb_ok():
+        db_journal = sb_get("journal", "order=opened_at.desc")
+        if db_journal:
+            # Normalize DB journal format to match local format
+            for dj in db_journal:
+                journal.append({
+                    "id": dj.get("id", "?")[:6] if dj.get("id") else dj.get("mt5_ticket", "?")[:6],
+                    "ts": dj.get("closed_at") or dj.get("opened_at", ""),
+                    "symbol": dj.get("symbol", "?"),
+                    "direction": dj.get("direction", "?"),
+                    "entry": dj.get("entry", 0),
+                    "sl": dj.get("sl", 0),
+                    "exit": dj.get("exit_price", 0),
+                    "lot": dj.get("lot", 0.01),
+                    "result": dj.get("outcome", "?"),
+                    "pnl_r": dj.get("pnl_r", 0),
+                    "grade": dj.get("grade", "?"),
+                    "score": dj.get("score", 0),
+                    "session": dj.get("session", "?"),
+                    "notes": dj.get("notes", ""),
+                })
+    if not journal:
+        journal = load_journal()
     stats   = journal_stats(journal)
 
     if stats:
@@ -4382,6 +4857,12 @@ def page_trades():
             if sess_data:
                 sd2 = pd.DataFrame([{"Session":se,"Trades":len(v),"Avg R":sum(v)/len(v)} for se,v in sess_data.items()])
                 st.dataframe(sd2, use_container_width=True, hide_index=True)
+
+    # ── Trade Intelligence — Learn from Wins & Losses ──
+    if journal and len(journal) >= 3:
+        st.markdown("---")
+        trade_insights = analyze_trade_patterns(journal)
+        render_trade_insights(trade_insights)
 
     # Full log table
     if journal:
@@ -5109,14 +5590,22 @@ def render_sidebar():
 def main():
     page = render_sidebar()
 
-    # ── Auto-sync MT5 positions to DB on every page load ──────
-    if _sb_ok() and get_ma_token() and get_ma_account():
-        if not st.session_state.get("_mt5_synced_this_run"):
+    # ── Load trades from DB on session start ──────────────────
+    if _sb_ok() and not st.session_state.get("_db_trades_loaded"):
+        if get_ma_token() and get_ma_account():
             with st.spinner("🔄 Syncing MT5 positions…"):
                 db_trades = sync_mt5_to_db()
-            # Merge DB trades into session state for UI compatibility
-            st.session_state["active_trades"] = db_trades
-            st.session_state["_mt5_synced_this_run"] = True
+        else:
+            db_trades = sb_get("trades")
+        # Merge DB trades with any session-state trades (de-dup by id)
+        existing_ids = {t.get("id") for t in st.session_state.get("active_trades", [])}
+        merged = list(st.session_state.get("active_trades", []))
+        for dt in db_trades:
+            if dt.get("id") not in existing_ids:
+                merged.append(dt)
+        st.session_state["active_trades"] = merged
+        st.session_state["_db_trades_loaded"] = True
+        st.session_state["_mt5_synced_this_run"] = True
 
     if page == "🏠  Overview":
         page_overview()
