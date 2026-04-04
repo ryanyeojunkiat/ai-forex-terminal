@@ -1435,11 +1435,11 @@ def calculate_smart_entry(df, direction, close, atr, symbol):
 def compute_levels(entry, direction, atr, symbol, df=None):
     """
     Smart SL/TP: uses swing highs/lows when available, ATR fallback.
-    TP1 targets nearest reachable swing level (min R:R 1.5).
-    TP2 uses ATR extension beyond TP1.
+    TP1 targets minimum 3:1 R:R. TP2 targets 5:1 R:R.
     """
     c = cfg(symbol)
-    min_rr = c.get("min_rr", 1.5)
+    MIN_RR1 = 3.0  # Minimum 3:1 R:R for TP1
+    MIN_RR2 = 5.0  # Minimum 5:1 R:R for TP2
 
     # ── SL: ATR-based (proven reliable) ───────────────────────
     sl_d = atr * c["atr_sl"]
@@ -1448,19 +1448,20 @@ def compute_levels(entry, direction, atr, symbol, df=None):
     else:
         sl = entry + sl_d
 
-    # ── TP1: ATR-based (proven reliable) ──────────────────────
-    tp1_d = atr * c["atr_tp1"]
+    # ── TP1: Minimum 3:1 R:R ─────────────────────────────────
+    tp1_d = sl_d * MIN_RR1  # 3x the risk
     if direction == "Buy":
         tp1 = entry + tp1_d
     else:
         tp1 = entry - tp1_d
 
-    # ── TP2: ATR extension beyond TP1 ─────────────────────────
-    tp2_extra = atr * c["atr_sl"] * 2
+    # ── TP2: Minimum 5:1 R:R ─────────────────────────────────
+    tp2_d = sl_d * MIN_RR2
     if direction == "Buy":
-        tp2 = tp1 + tp2_extra
+        tp2 = entry + tp2_d
     else:
-        tp2 = tp1 - tp2_extra
+        tp2 = entry - tp2_d
+    tp2_extra = tp2_d  # for safety check
 
     # ── Safety check: ensure SL/TP on correct side ─────────
     if direction == "Buy":
@@ -2862,34 +2863,46 @@ def _gold_v5_m5_trigger(df_m5, direction, zone, atr):
     return {"passed":triggered,"type":tt,"entry_price":close,"details":details,"ob_present":ob_present}
 
 def _gold_v5_entry_levels(close, direction, zone, atr, zones, df_m15):
-    """Zone-based SL/TP: SL at zone edge, TP at opposing zone or R:R."""
+    """Zone-based SL/TP: SL at zone edge, TP at 3:1 and 5:1 R:R minimum."""
+    MIN_RR1 = 3.0  # Minimum 3:1 risk-reward for TP1
+    MIN_RR2 = 5.0  # Minimum 5:1 risk-reward for TP2
     if zone is None:
         m = 1 if direction=="Buy" else -1
         sl = round(close - m*atr*2, 2)
-        return {"sl":sl,"tp1":round(close+m*atr*3,2),"tp2":round(close+m*atr*5,2),
-                "sl_pips":round(abs(close-sl)/0.1,1),"rr1":1.5,"rr2":2.5,"sl_type":"ATR fallback","tp_type":"ATR fallback"}
+        sl_d = abs(close - sl)
+        return {"sl":sl,"tp1":round(close+m*sl_d*MIN_RR1,2),"tp2":round(close+m*sl_d*MIN_RR2,2),
+                "sl_pips":round(sl_d/0.1,1),"rr1":MIN_RR1,"rr2":MIN_RR2,"sl_type":"ATR fallback","tp_type":"ATR fallback"}
     buf = atr * 0.5
     if direction == "Buy":
         sl = round(zone["low"] - buf, 2); sl_d = close - sl
-        tp1 = round(close + sl_d*2, 2); tp_type = "2:1 R:R"
+        # Default TP1 at 3:1 R:R
+        tp1 = round(close + sl_d * MIN_RR1, 2); tp_type = f"{MIN_RR1:.0f}:1 R:R"
+        # Check if opposing zone is further → use it as TP1
         for sz in sorted(zones.get("supply",[]), key=lambda z: z["low"]):
-            if sz["low"] > close + sl_d: tp1 = round(sz["low"], 2); tp_type = "Supply Zone"; break
-        tp2 = round(close + sl_d*3, 2)
+            sz_rr = (sz["low"] - close) / sl_d if sl_d > 0 else 0
+            if sz_rr >= MIN_RR1:
+                tp1 = round(sz["low"], 2); tp_type = f"Supply Zone ({sz_rr:.1f}:1)"; break
+        tp2 = round(close + sl_d * MIN_RR2, 2)
+        # Check swing highs for TP2
         if df_m15 is not None and len(df_m15) >= 20:
             for i in range(len(df_m15)-3, 1, -1):
                 h=float(df_m15.iloc[i]["high"])
-                if i+1<len(df_m15) and h>float(df_m15.iloc[i-1]["high"]) and h>float(df_m15.iloc[i+1]["high"]) and h>close+sl_d*1.5:
+                h_rr = (h - close) / sl_d if sl_d > 0 else 0
+                if i+1<len(df_m15) and h>float(df_m15.iloc[i-1]["high"]) and h>float(df_m15.iloc[i+1]["high"]) and h_rr >= MIN_RR2:
                     tp2=round(h,2); break
     else:
         sl = round(zone["high"] + buf, 2); sl_d = sl - close
-        tp1 = round(close - sl_d*2, 2); tp_type = "2:1 R:R"
+        tp1 = round(close - sl_d * MIN_RR1, 2); tp_type = f"{MIN_RR1:.0f}:1 R:R"
         for dz in sorted(zones.get("demand",[]), key=lambda z: -z["high"]):
-            if dz["high"] < close - sl_d: tp1 = round(dz["high"], 2); tp_type = "Demand Zone"; break
-        tp2 = round(close - sl_d*3, 2)
+            dz_rr = (close - dz["high"]) / sl_d if sl_d > 0 else 0
+            if dz_rr >= MIN_RR1:
+                tp1 = round(dz["high"], 2); tp_type = f"Demand Zone ({dz_rr:.1f}:1)"; break
+        tp2 = round(close - sl_d * MIN_RR2, 2)
         if df_m15 is not None and len(df_m15) >= 20:
             for i in range(len(df_m15)-3, 1, -1):
                 l=float(df_m15.iloc[i]["low"])
-                if i+1<len(df_m15) and l<float(df_m15.iloc[i-1]["low"]) and l<float(df_m15.iloc[i+1]["low"]) and l<close-sl_d*1.5:
+                l_rr = (close - l) / sl_d if sl_d > 0 else 0
+                if i+1<len(df_m15) and l<float(df_m15.iloc[i-1]["low"]) and l<float(df_m15.iloc[i+1]["low"]) and l_rr >= MIN_RR2:
                     tp2=round(l,2); break
     sp = abs(close-sl)/0.1
     rr1 = abs(tp1-close)/max(abs(close-sl),0.01)
@@ -4919,9 +4932,10 @@ def page_backtest():
     if bt_lot_mode == "Custom":
         bt_custom_lot = st.number_input("Custom Lot Size", value=0.05, min_value=0.01, max_value=100.0, step=0.01, format="%.2f", key="bt_custom_lot")
 
-    b7, b8 = st.columns(2)
+    b7, b8, b9 = st.columns(3)
     bt_min_grade = b7.selectbox("Min Grade", ["A+ only", "A and above", "B and above"], index=1, key="bt_min_grade")
-    run_bt = b8.button("▶ Run Backtest", key="btn_bt", type="primary")
+    bt_strategy = b8.selectbox("Strategy", ["Compare Both", "S/D Gate Engine (New)", "Score System (Old)"], key="bt_strategy")
+    run_bt = b9.button("▶ Run Backtest", key="btn_bt", type="primary")
 
     if not run_bt:
         return
@@ -4930,10 +4944,17 @@ def page_backtest():
     c_ = cfg(bt_sym)
     ccy = st.session_state.get("currency_label", "USD")
 
-    with st.spinner("Running backtest..."):
+    with st.spinner("Fetching data..."):
         try:
             df_raw = add_indicators(fetch_bars(bt_sym, interval, bt_bars, td_key))
             df_h4  = add_indicators(fetch_bars(bt_sym, "4h", 300, td_key))
+            # Fetch H1 for S/D Gate Engine backtest
+            df_h1_bt = None
+            if bt_strategy in ("Compare Both", "S/D Gate Engine (New)"):
+                try:
+                    df_h1_bt = add_indicators(fetch_bars(bt_sym, "1h", 300, td_key))
+                except Exception:
+                    df_h1_bt = None
         except Exception as e:
             st.error(f"Error: {e}"); return
 
@@ -4945,13 +4966,176 @@ def page_backtest():
     else:
         allowed_grades = {"A+", "A", "B"}
 
+    run_old = bt_strategy in ("Compare Both", "Score System (Old)")
+    run_new = bt_strategy in ("Compare Both", "S/D Gate Engine (New)")
+
+    # ================================================================
+    # S/D GATE ENGINE BACKTEST (NEW STRATEGY)
+    # ================================================================
+    trades_gate = []
+    if run_new:
+        with st.spinner("Running S/D Gate Engine backtest..."):
+            gate_last_bar = 0
+            gate_consec_loss = 0
+            is_gold_g = norm(bt_sym) == "XAUUSD"
+            COOLDOWN_G = 15 if is_gold_g else 8
+
+            h4_times_g = None; h1_times_g = None; raw_times_g = None
+            try:
+                h4_times_g = pd.to_datetime(df_h4["time"], utc=True)
+                raw_times_g = pd.to_datetime(df_raw["time"], utc=True)
+                if df_h1_bt is not None:
+                    h1_times_g = pd.to_datetime(df_h1_bt["time"], utc=True)
+            except Exception:
+                pass
+
+            ig = 200
+            while ig < len(df_raw) - 1:
+                row_g = df_raw.iloc[ig]
+                close_g = float(row_g["close"])
+                atr_g = float(row_g.get("atr14", 0.001) or 0.001)
+
+                if ig - gate_last_bar < COOLDOWN_G and gate_last_bar > 0:
+                    ig += 1; continue
+                if gate_consec_loss >= 3:
+                    gate_consec_loss = 0; ig += COOLDOWN_G; continue
+
+                # Slice timeframes to prevent lookahead
+                df_h4_g = df_h4
+                df_h1_g = df_h1_bt
+                df_m15_g = df_raw.iloc[:ig + 1]  # Use raw data as M15/M5 proxy
+                df_m5_g = df_raw.iloc[max(0, ig - 60):ig + 1]  # Recent slice for M5
+                if h4_times_g is not None and raw_times_g is not None:
+                    ct = raw_times_g.iloc[ig]
+                    h4_mask_g = h4_times_g <= ct
+                    if h4_mask_g.sum() >= 50:
+                        df_h4_g = df_h4.iloc[:h4_mask_g.sum()]
+                    if h1_times_g is not None:
+                        h1_mask_g = h1_times_g <= ct
+                        if h1_mask_g.sum() >= 30:
+                            df_h1_g = df_h1_bt.iloc[:h1_mask_g.sum()]
+
+                # Run S/D Gate Engine
+                try:
+                    sd_res = sd_gate_engine(bt_sym, df_h4_g, df_h1_g, df_m15_g, df_m5_g)
+                except Exception:
+                    ig += 1; continue
+
+                gp_count = sd_res.get("gates_passed", 0)
+                sd_dir = sd_res.get("direction", "Wait")
+                sd_grade = sd_res.get("grade", "D")
+                sd_signal = sd_res.get("signal", "NO_SETUP")
+
+                # Only enter if enough gates pass and grade qualifies
+                if sd_signal not in ("ENTRY", "CONFIRMED_WAIT_TRIGGER"):
+                    ig += 1; continue
+                if sd_grade not in allowed_grades:
+                    ig += 1; continue
+                if sd_dir == "Wait":
+                    ig += 1; continue
+
+                # Use gate engine levels
+                v5_lvl = sd_res.get("levels", {})
+                if v5_lvl.get("sl"):
+                    sl_g = v5_lvl["sl"]; tp1_g = v5_lvl["tp1"]; tp2_g = v5_lvl["tp2"]
+                else:
+                    lvl_g = compute_levels(close_g, sd_dir, atr_g, bt_sym, df=df_m15_g)
+                    sl_g = lvl_g["sl"]; tp1_g = lvl_g["tp1"]; tp2_g = lvl_g["tp2"]
+
+                # Lot size
+                sl_pips_g = abs(close_g - sl_g) / c_.get("pip", 0.0001)
+                if bt_lot_mode == "Auto (risk-based)":
+                    lot_g = compute_lot(bt_balance, bt_risk_pct, sl_pips_g, bt_sym)
+                elif bt_lot_mode == "Custom":
+                    lot_g = bt_custom_lot
+                elif bt_lot_mode == "Fixed 0.01":
+                    lot_g = 0.01
+                elif bt_lot_mode == "Fixed 0.1":
+                    lot_g = 0.1
+                else:
+                    lot_g = 1.0
+
+                # Simulate forward (same trailing stop as old backtest)
+                max_bars_g = 80 if is_gold_g else 150
+                result_g = "timeout"; exit_price_g = close_g; exit_ig = ig
+                trailing_sl_g = sl_g
+                risk_dist_g = abs(close_g - sl_g)
+                tp1_dist_g = abs(tp1_g - close_g)
+                be_level_g = close_g + tp1_dist_g * 0.33 if sd_dir == "Buy" else close_g - tp1_dist_g * 0.33
+                trail_level_g = close_g + tp1_dist_g * 0.66 if sd_dir == "Buy" else close_g - tp1_dist_g * 0.66
+                moved_be_g = False; trailing_on_g = False; best_g = close_g
+
+                for jg in range(ig + 1, min(ig + max_bars_g, len(df_raw))):
+                    fg = df_raw.iloc[jg]
+                    fhg = float(fg["high"]); flg = float(fg["low"])
+                    if sd_dir == "Buy":
+                        best_g = max(best_g, fhg)
+                    else:
+                        best_g = min(best_g, flg)
+                    if not moved_be_g:
+                        if (sd_dir == "Buy" and fhg >= be_level_g) or (sd_dir == "Sell" and flg <= be_level_g):
+                            trailing_sl_g = close_g + (atr_g * 0.1 if sd_dir == "Buy" else -atr_g * 0.1)
+                            moved_be_g = True
+                    if not trailing_on_g and moved_be_g:
+                        if (sd_dir == "Buy" and fhg >= trail_level_g) or (sd_dir == "Sell" and flg <= trail_level_g):
+                            trailing_on_g = True
+                    if trailing_on_g:
+                        if sd_dir == "Buy":
+                            trailing_sl_g = max(trailing_sl_g, best_g - atr_g * 1.2)
+                        else:
+                            trailing_sl_g = min(trailing_sl_g, best_g + atr_g * 1.2)
+                    if sd_dir == "Buy":
+                        if flg <= trailing_sl_g:
+                            result_g = "Loss" if not moved_be_g else ("Win" if trailing_sl_g > close_g + atr_g * 0.05 else "BE")
+                            exit_price_g = trailing_sl_g; exit_ig = jg; break
+                        if fhg >= tp1_g:
+                            result_g = "Win"; exit_price_g = tp1_g; exit_ig = jg; break
+                    else:
+                        if fhg >= trailing_sl_g:
+                            result_g = "Loss" if not moved_be_g else ("Win" if trailing_sl_g < close_g - atr_g * 0.05 else "BE")
+                            exit_price_g = trailing_sl_g; exit_ig = jg; break
+                        if flg <= tp1_g:
+                            result_g = "Win"; exit_price_g = tp1_g; exit_ig = jg; break
+
+                if result_g == "timeout":
+                    exit_price_g = float(df_raw.iloc[min(ig + max_bars_g - 1, len(df_raw) - 1)]["close"])
+                    exit_ig = min(ig + max_bars_g - 1, len(df_raw) - 1)
+
+                risk_g = abs(close_g - sl_g)
+                move_g = (exit_price_g - close_g) if sd_dir == "Buy" else (close_g - exit_price_g)
+                pnl_r_g = move_g / risk_g if risk_g > 0 else 0
+                pnl_usd_g = pnl_r_g * (bt_balance * bt_risk_pct / 100)
+
+                if result_g == "Loss":
+                    gate_consec_loss += 1
+                elif result_g == "Win":
+                    gate_consec_loss = 0
+
+                gate_last_bar = exit_ig
+                _conf = sd_res.get("confluence", {})
+                trades_gate.append({
+                    "Date": str(df_raw.iloc[ig]["time"])[:16], "Dir": sd_dir,
+                    "Grade": sd_grade, "Gates": gp_count,
+                    "Signal": sd_signal[:12],
+                    "Entry": round(close_g, c_["dec"]), "SL": round(sl_g, c_["dec"]),
+                    "TP1": round(tp1_g, c_["dec"]), "Lot": lot_g,
+                    "Result": result_g, "PnL_R": round(pnl_r_g, 2),
+                    "PnL_$": round(pnl_usd_g, 2), "Bars": exit_ig - ig,
+                    "Confluence": _conf.get("count", 0),
+                    "KZ": _conf.get("killzone", "")[:8],
+                })
+                ig = exit_ig + 1
+
+    # ================================================================
+    # OLD SCORE SYSTEM BACKTEST
+    # ================================================================
     trades_bt = []
     spike_trades = 0
     consecutive_losses = 0
     last_trade_bar = 0
     is_gold = norm(bt_sym) == "XAUUSD"
-    COOLDOWN_BARS = 15 if is_gold else 8  # Gold needs more cooldown
-    OVEREXT_THRESH = 2.0 if is_gold else 3.0  # Stricter for gold
+    COOLDOWN_BARS = 15 if is_gold else 8
+    OVEREXT_THRESH = 2.0 if is_gold else 3.0
 
     # ── Precompute H4 time index to prevent lookahead bias ────
     h4_times = None
@@ -4960,11 +5144,12 @@ def page_backtest():
         h4_times = pd.to_datetime(df_h4["time"], utc=True)
         raw_times = pd.to_datetime(df_raw["time"], utc=True)
     except Exception:
-        pass  # Fallback: use full df_h4 (no time column)
+        pass
 
     i = 200
+    _run_old_loop = run_old  # Only run old backtest if selected
 
-    while i < len(df_raw)-1:
+    while i < len(df_raw)-1 and _run_old_loop:
         row   = df_raw.iloc[i]
         df_sl = df_raw.iloc[:i+1]
         close = float(row["close"])
@@ -5043,8 +5228,8 @@ def page_backtest():
         max_bars_forward = 80 if is_gold else 150  # Gold: faster timeout
         result = "timeout"; exit_price = close; exit_i = i
         trailing_sl = sl
-        be_trigger_pct = 0.5  # Move to BE at 50% of TP1 (was 60%)
-        trail_trigger_pct = 0.75  # Start trailing at 75% of TP1
+        be_trigger_pct = 0.33  # Move to BE at 1:1 R:R (33% of 3:1 TP1)
+        trail_trigger_pct = 0.66  # Start trailing at 2:1 R:R (66% of 3:1 TP1)
         risk_dist = abs(close - sl)
         tp1_dist = abs(tp1 - close)
 
@@ -5070,17 +5255,17 @@ def page_backtest():
                     trailing_sl = close + (atr * 0.1 if direction == "Buy" else -atr * 0.1)
                     moved_to_be = True
 
-            # Stage 2: Active trailing at 75% of TP1 — trail by 0.7× ATR (wider to let trades run)
+            # Stage 2: Active trailing at 2:1 R:R — trail by 1.2× ATR (wide to let trades run to 3:1)
             if not trailing_active and moved_to_be:
                 if (direction == "Buy" and fh >= trail_level) or (direction == "Sell" and fl <= trail_level):
                     trailing_active = True
 
             if trailing_active:
                 if direction == "Buy":
-                    new_trail = best_price - atr * 0.7
+                    new_trail = best_price - atr * 1.2
                     trailing_sl = max(trailing_sl, new_trail)
                 else:
-                    new_trail = best_price + atr * 0.7
+                    new_trail = best_price + atr * 1.2
                     trailing_sl = min(trailing_sl, new_trail)
 
             # Check SL hit — profitable trailing exits count as Win
@@ -5138,8 +5323,128 @@ def page_backtest():
         })
         i = exit_i + 1
 
-    if not trades_bt:
+    if not trades_bt and not trades_gate:
         st.info("No qualifying trades found in this period."); return
+
+    # ================================================================
+    # S/D GATE ENGINE RESULTS (show first if available)
+    # ================================================================
+    if trades_gate:
+        df_gate = pd.DataFrame(trades_gate)
+        g_wins = len(df_gate[df_gate["Result"] == "Win"])
+        g_losses = len(df_gate[df_gate["Result"] == "Loss"])
+        g_bes = len(df_gate[df_gate["Result"] == "BE"])
+        g_total = len(df_gate)
+        g_decided = g_wins + g_losses
+        g_wr = g_wins / g_decided * 100 if g_decided else 0
+        g_total_r = df_gate["PnL_R"].sum()
+        g_total_usd = df_gate["PnL_$"].sum()
+        g_avg_r = df_gate["PnL_R"].mean()
+        g_gp = df_gate[df_gate["PnL_R"] > 0]["PnL_R"].sum()
+        g_gl = abs(df_gate[df_gate["PnL_R"] < 0]["PnL_R"].sum())
+        g_pf = g_gp / g_gl if g_gl > 0 else 0
+        g_cum_r = df_gate["PnL_R"].cumsum()
+        g_max_dd = (g_cum_r.cummax() - g_cum_r).max()
+
+        st.markdown("<div class='mono-title' style='margin-top:16px;color:#ffd700;'>"
+                    "S/D GATE ENGINE RESULTS (NEW)</div>", unsafe_allow_html=True)
+        def gs(lbl, val, col="#e8edf2"):
+            return (f"<div style='background:#0d1117;border:1px solid rgba(255,215,0,0.15);"
+                    f"border-radius:8px;padding:10px;flex:1;min-width:80px;text-align:center;'>"
+                    f"<div style='font-size:9px;color:#8b9ab0;font-family:Space Mono,monospace;"
+                    f"letter-spacing:.06em;margin-bottom:4px;'>{lbl}</div>"
+                    f"<div style='font-size:16px;font-weight:700;color:{col};font-family:Space Mono,monospace;'>{val}</div></div>")
+        st.markdown(
+            f"<div style='display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;'>"
+            f"{gs('TRADES', g_total)}"
+            f"{gs('WIN RATE', f'{g_wr:.0f}%', '#10b981' if g_wr >= 50 else '#ef4444')}"
+            f"{gs('TOTAL R', f'{g_total_r:+.1f}R', '#10b981' if g_total_r > 0 else '#ef4444')}"
+            f"{gs(f'P&L ({ccy})', f'{g_total_usd:+,.0f}', '#10b981' if g_total_usd > 0 else '#ef4444')}"
+            f"{gs('PROFIT F', f'{g_pf:.2f}', '#10b981' if g_pf > 1 else '#ef4444')}"
+            f"{gs('MAX DD', f'{g_max_dd:.1f}R', '#ef4444')}"
+            f"</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;'>"
+            f"{gs('AVG R', f'{g_avg_r:+.2f}', '#10b981' if g_avg_r > 0 else '#ef4444')}"
+            f"{gs('WINS', g_wins, '#10b981')}"
+            f"{gs('LOSSES', g_losses, '#ef4444')}"
+            f"{gs('BE', g_bes, '#f59e0b')}"
+            f"</div>", unsafe_allow_html=True)
+        # Equity curve
+        fig_ge = go.Figure()
+        fig_ge.add_trace(go.Scatter(x=df_gate["Date"], y=g_cum_r, mode="lines+markers",
+                                     line=dict(color="#ffd700", width=2),
+                                     fill="tozeroy", fillcolor="rgba(255,215,0,0.06)",
+                                     name="S/D Gate (New)"))
+        fig_ge.update_layout(title="S/D Gate Engine — Equity Curve (R)",
+                              paper_bgcolor="#080c10", plot_bgcolor="#080c10",
+                              font=dict(color="#e8edf2"), height=300,
+                              margin=dict(l=0, r=0, t=30, b=0), showlegend=True,
+                              legend=dict(orientation="h", y=1.02, bgcolor="rgba(0,0,0,0)"))
+        for ax in ["xaxis", "yaxis"]:
+            fig_ge.update_layout(**{ax: dict(gridcolor="rgba(255,255,255,0.05)")})
+        st.plotly_chart(fig_ge, use_container_width=True)
+        # Trade log
+        with st.expander("S/D Gate Trade Log", expanded=False):
+            st.dataframe(df_gate, use_container_width=True, hide_index=True)
+
+    # ================================================================
+    # COMPARISON VIEW (if both strategies ran)
+    # ================================================================
+    if trades_gate and trades_bt:
+        st.markdown("---")
+        st.markdown("<div class='mono-title' style='margin-top:16px;color:#00d4aa;'>"
+                    "HEAD-TO-HEAD COMPARISON</div>", unsafe_allow_html=True)
+        df_gate_c = pd.DataFrame(trades_gate)
+        df_bt_c = pd.DataFrame(trades_bt)
+        g_wr_c = len(df_gate_c[df_gate_c["Result"] == "Win"]) / max(1, len(df_gate_c[df_gate_c["Result"].isin(["Win", "Loss"])])) * 100
+        o_wr_c = len(df_bt_c[df_bt_c["Result"] == "Win"]) / max(1, len(df_bt_c[df_bt_c["Result"].isin(["Win", "Loss"])])) * 100
+        comp_data = {
+            "Metric": ["Trades", "Win Rate", "Total R", "Avg R", "Profit Factor", "Max Drawdown",
+                        f"P&L ({ccy})"],
+            "S/D Gate (New)": [
+                len(df_gate_c), f"{g_wr_c:.0f}%",
+                f"{df_gate_c['PnL_R'].sum():+.1f}R", f"{df_gate_c['PnL_R'].mean():+.2f}",
+                f"{df_gate_c[df_gate_c['PnL_R']>0]['PnL_R'].sum()/max(0.01,abs(df_gate_c[df_gate_c['PnL_R']<0]['PnL_R'].sum())):.2f}",
+                f"{(df_gate_c['PnL_R'].cumsum().cummax()-df_gate_c['PnL_R'].cumsum()).max():.1f}R",
+                f"{df_gate_c['PnL_$'].sum():+,.0f}"],
+            "Score System (Old)": [
+                len(df_bt_c), f"{o_wr_c:.0f}%",
+                f"{df_bt_c['PnL_R'].sum():+.1f}R", f"{df_bt_c['PnL_R'].mean():+.2f}",
+                f"{df_bt_c[df_bt_c['PnL_R']>0]['PnL_R'].sum()/max(0.01,abs(df_bt_c[df_bt_c['PnL_R']<0]['PnL_R'].sum())):.2f}",
+                f"{(df_bt_c['PnL_R'].cumsum().cummax()-df_bt_c['PnL_R'].cumsum()).max():.1f}R",
+                f"{df_bt_c['PnL_$'].sum():+,.0f}"],
+        }
+        st.dataframe(pd.DataFrame(comp_data), use_container_width=True, hide_index=True)
+        # Overlay equity curves
+        fig_comp = go.Figure()
+        fig_comp.add_trace(go.Scatter(x=df_gate_c["Date"], y=df_gate_c["PnL_R"].cumsum(),
+                                       mode="lines", name="S/D Gate (New)",
+                                       line=dict(color="#ffd700", width=2)))
+        fig_comp.add_trace(go.Scatter(x=df_bt_c["Date"], y=df_bt_c["PnL_R"].cumsum(),
+                                       mode="lines", name="Score System (Old)",
+                                       line=dict(color="#8b5cf6", width=2)))
+        fig_comp.update_layout(title="Equity Curve Comparison",
+                                paper_bgcolor="#080c10", plot_bgcolor="#080c10",
+                                font=dict(color="#e8edf2"), height=350,
+                                margin=dict(l=0, r=0, t=30, b=0), showlegend=True,
+                                legend=dict(orientation="h", y=1.02, bgcolor="rgba(0,0,0,0)"))
+        for ax in ["xaxis", "yaxis"]:
+            fig_comp.update_layout(**{ax: dict(gridcolor="rgba(255,255,255,0.05)")})
+        fig_comp.add_hline(y=0, line_color="rgba(255,255,255,0.2)", line_width=1)
+        st.plotly_chart(fig_comp, use_container_width=True)
+        st.markdown("---")
+
+    # ================================================================
+    # OLD SCORE SYSTEM RESULTS
+    # ================================================================
+    if not trades_bt:
+        if not trades_gate:
+            st.info("No qualifying trades found."); return
+        elif not run_old:
+            return  # Only gate engine was run, already displayed above
+        else:
+            st.info("No qualifying trades found with old score system."); return
 
     df_bt  = pd.DataFrame(trades_bt)
     wins   = len(df_bt[df_bt["Result"]=="Win"])
@@ -5168,7 +5473,8 @@ def page_backtest():
             streak_w = 0; streak_l = 0
 
     # ── Stats Dashboard ──────────────────────────────────────
-    st.markdown("<div class='mono-title' style='margin-top:16px;'>BACKTEST RESULTS</div>", unsafe_allow_html=True)
+    _old_label = " (OLD)" if trades_gate else ""
+    st.markdown(f"<div class='mono-title' style='margin-top:16px;'>SCORE SYSTEM RESULTS{_old_label}</div>", unsafe_allow_html=True)
 
     def bt_stat(lbl, val, col="#e8edf2"):
         return (f"<div style='background:#0d1117;border:1px solid rgba(255,255,255,0.08);"
