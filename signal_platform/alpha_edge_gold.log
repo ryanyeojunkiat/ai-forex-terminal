@@ -1,0 +1,28 @@
+2026-04-04 13:58:11,561 [alphaedge.main] INFO: ==================================================
+2026-04-04 13:58:11,561 [alphaedge.main] INFO: AlphaEdge Gold Signals starting...
+2026-04-04 13:58:11,561 [alphaedge.main] INFO: Asset: XAUUSD (Gold) — ONLY
+2026-04-04 13:58:11,561 [alphaedge.main] INFO: ==================================================
+2026-04-04 13:58:12,607 [alphaedge.mt5] ERROR: Account info error: HTTPSConnectionPool(host='mt-client-api-v1.agiliumtrade.agiliumtrade.ai', port=443): Max retries exceeded with url: /users/current/accounts/42a31081-03f4-44c9-90ba-2515a5c98205/account-information (Caused by SSLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate (_ssl.c:1081)')))
+2026-04-04 13:58:12,612 [alphaedge.price_feed] INFO: Gold price feed started — 2.0s interval
+2026-04-04 13:58:12,613 [alphaedge.telegram] INFO: Telegram polling started...
+2026-04-04 13:58:12,613 [alphaedge.main] INFO: Telegram bot started
+2026-04-04 13:58:18,308 [alphaedge.price_feed] WARNING: MetaAPI failed 3x, switching to Twelve Data
+2026-04-04 13:58:23,468 [alphaedge.main] INFO: Platform ready — entering main loop
+2026-04-04 14:23:21,002 [alphaedge.main] INFO: Shutting down...
+2026-04-04 14:23:21,141 [alphaedge.price_feed] INFO: Gold price feed stopped
+2026-04-04 14:23:21,988 [alphaedge.main] INFO: Shutdown complete
+2026-04-04 14:23:23,622 [alphaedge.main] INFO: ==================================================
+2026-04-04 14:23:23,622 [alphaedge.main] INFO: AlphaEdge Gold Signals starting...
+2026-04-04 14:23:23,622 [alphaedge.main] INFO: Asset: XAUUSD (Gold) — ONLY
+2026-04-04 14:23:23,622 [alphaedge.main] INFO: ==================================================
+2026-04-04 14:23:24,637 [alphaedge.mt5] ERROR: Account info error: Expecting value: line 1 column 1 (char 0)
+2026-04-04 14:23:24,639 [alphaedge.price_feed] INFO: Gold price feed started — 2.0s interval
+2026-04-04 14:23:24,640 [alphaedge.telegram] INFO: Telegram polling started...
+2026-04-04 14:23:24,640 [alphaedge.main] INFO: Telegram bot started
+2026-04-04 14:23:30,365 [alphaedge.price_feed] WARNING: MetaAPI failed 3x, switching to Twelve Data
+2026-04-04 14:23:35,429 [alphaedge.main] INFO: Platform ready — entering main loop
+2026-04-04 14:26:21,306 [alphaedge.main] INFO: Shutting down...
+2026-04-04 14:26:23,183 [alphaedge.price_feed] INFO: Gold price feed stopped
+2026-04-04 14:26:26,598 [alphaedge.main] INFO: Shutting down...
+2026-04-04 14:26:26,598 [alphaedge.price_feed] INFO: Gold price feed stopped
+2026-04-04 14:26:27,471 [alphaedge.main] INFO: Shutdown complete
