@@ -1,0 +1,23 @@
+# Secrets
+.env
+signal_platform/.env
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# Temp files
+.~lock.*
+*.json
+!signal_platform/package.json
+
+# Local backups
+*_backup*
