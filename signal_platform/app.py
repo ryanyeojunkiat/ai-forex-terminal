@@ -161,17 +161,63 @@ def start_bot():
 #  START BOT (once per session)
 # ═══════════════════════════════════════════════════════════
 
-if "bot_running" not in st.session_state:
-    st.session_state["bot_running"] = False
+# Use a file-based flag so the bot only starts ONCE, even across page refreshes.
+# st.session_state resets on meta-refresh, so we can't rely on it alone.
+BOT_LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_running")
 
-if not st.session_state["bot_running"]:
+def _is_bot_running():
+    """Check if bot is already running (file-based lock)."""
+    if os.path.exists(BOT_LOCK_FILE):
+        try:
+            with open(BOT_LOCK_FILE, "r") as f:
+                pid = int(f.read().strip())
+            # Check if process is still alive
+            os.kill(pid, 0)
+            return True
+        except (ValueError, ProcessLookupError, OSError):
+            # Stale lock file — process died
+            os.remove(BOT_LOCK_FILE)
+            return False
+    return False
+
+def _mark_bot_running():
+    """Write current PID to lock file."""
+    with open(BOT_LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+if not _is_bot_running():
+    _mark_bot_running()
     start_bot()
+    st.session_state["bot_running"] = True
+else:
     st.session_state["bot_running"] = True
 
 
 # ═══════════════════════════════════════════════════════════
 #  DASHBOARD UI
 # ═══════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════
+#  PASSWORD PROTECTION — Only admin can see dashboard
+# ═══════════════════════════════════════════════════════════
+
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "alphaedge2026")
+
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+
+if not st.session_state["authenticated"]:
+    st.markdown("# 🥇 AlphaEdge Gold Signals")
+    st.markdown("**Admin Login Required**")
+    st.markdown("---")
+    password = st.text_input("Enter admin password:", type="password")
+    if st.button("Login", type="primary"):
+        if password == ADMIN_PASSWORD:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Wrong password. Try again.")
+    st.stop()
 
 st.markdown("# 🥇 AlphaEdge Gold Signals")
 st.markdown("**XAUUSD Auto Signal Platform — Admin Dashboard**")
@@ -324,10 +370,7 @@ with tab4:
     st.markdown("---")
     st.markdown(f"**Bot started:** {st.session_state.get('bot_started_at', 'N/A')}")
 
-# ── Auto-refresh every 30 seconds ──
-st.markdown(
-    """
-    <meta http-equiv="refresh" content="30">
-    """,
-    unsafe_allow_html=True,
-)
+# ── Auto-refresh every 30 seconds (without resetting session state) ──
+import time as _time
+_time.sleep(30)
+st.rerun()

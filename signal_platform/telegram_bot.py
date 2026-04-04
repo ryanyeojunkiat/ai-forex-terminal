@@ -128,6 +128,25 @@ def send_photo(chat_id, photo_url, caption="", parse_mode="HTML"):
         return False
 
 
+def _forward_photo(chat_id, file_id, caption="", parse_mode="HTML"):
+    """Send a photo by file_id (forwarding a screenshot to admin)."""
+    try:
+        resp = requests.post(
+            f"{BASE_URL}/sendPhoto",
+            json={
+                "chat_id": chat_id,
+                "photo": file_id,
+                "caption": caption,
+                "parse_mode": parse_mode,
+            },
+            timeout=10,
+        )
+        return resp.json().get("ok", False)
+    except Exception as e:
+        logger.error(f"Forward photo error: {e}")
+        return False
+
+
 def get_chat_invite_link(chat_id):
     """Generate an invite link for the group/channel."""
     try:
@@ -307,14 +326,16 @@ class OnboardingHandler:
 
         return False
 
-    def handle_photo(self, chat_id, user_id, first_name="", username=""):
+    def handle_photo(self, chat_id, user_id, first_name="", username="", file_id=None):
         """Handle photo uploads (for account proof screenshots)."""
         user = self._get_user(user_id)
         state = user["state"]
 
-        if state == STATE_WAITING_PROOF:
+        if state == STATE_WAITING_PROOF or state == STATE_PENDING_APPROVAL:
             user["state"] = STATE_PENDING_APPROVAL
             user["proof_submitted"] = datetime.now(timezone.utc).isoformat()
+            if file_id:
+                user["proof_file_id"] = file_id
             self._save()
 
             send_message(chat_id, (
@@ -323,10 +344,18 @@ class OnboardingHandler:
                 "You'll receive a notification once approved. ⏳"
             ))
 
-            # Notify all admins
+            # Notify all admins — forward the photo + info
             for admin_id in self.admin_ids:
                 name = user.get("name", "Unknown")
                 uname = f"@{user.get('username')}" if user.get("username") else "No username"
+
+                # Forward the actual screenshot to admin
+                if file_id:
+                    _forward_photo(admin_id, file_id, (
+                        f"📸 <b>PROOF from {name} ({uname})</b>\n"
+                        f"ID: <code>{user_id}</code>"
+                    ))
+
                 send_message(admin_id, (
                     f"🔔 <b>NEW APPLICATION</b>\n"
                     f"{'━' * 28}\n"
@@ -407,9 +436,20 @@ class OnboardingHandler:
         """Process capital amount response."""
         text = text.strip()
 
-        if text == "1" or "300" in text or "499" in text:
-            # Below minimum
-            user["capital"] = "USD 300-499"
+        capital_map = {
+            "1": ("USD 300-499", True),   # (label, is_rejected)
+            "2": ("USD 500-1,000", False),
+            "3": ("USD 1,000+", False),
+        }
+
+        if text not in capital_map:
+            send_message(chat_id, "Please reply with <b>1</b>, <b>2</b>, or <b>3</b>")
+            return True
+
+        label, rejected = capital_map[text]
+        user["capital"] = label
+
+        if rejected:
             user["state"] = STATE_REJECTED
             self._save()
 
@@ -422,14 +462,6 @@ class OnboardingHandler:
                 "When you're ready to deposit USD 500 or more, "
                 "just send /start again and we'll get you set up! 🥇"
             ))
-            return True
-
-        elif text == "2" or "500" in text or "1000" in text or "1,000" in text:
-            user["capital"] = "USD 500-1,000"
-        elif text == "3" or "1000" in text.replace(",", "") or "more" in text.lower():
-            user["capital"] = "USD 1,000+"
-        else:
-            send_message(chat_id, "Please reply with <b>1</b>, <b>2</b>, or <b>3</b>")
             return True
 
         # Move to experience question
@@ -458,7 +490,12 @@ class OnboardingHandler:
             "3": "1-3 years",
             "4": "More than 3 years",
         }
-        user["experience"] = exp_map.get(text, text)
+
+        if text not in exp_map:
+            send_message(chat_id, "Please reply with <b>1</b>, <b>2</b>, <b>3</b>, or <b>4</b>")
+            return True
+
+        user["experience"] = exp_map[text]
         user["state"] = STATE_SENT_STEPS
         self._save()
 
@@ -536,27 +573,43 @@ class OnboardingHandler:
         # Generate or use existing invite link
         invite_link = self.group_invite_link
         if not invite_link:
+            # Try to generate one from the channel
             invite_link = get_chat_invite_link(TELEGRAM_CHANNEL_ID)
 
-        # Send approval to user
-        send_message(int(user_id), (
-            f"🎉 <b>APPROVED! Welcome to {PLATFORM_NAME}!</b>\n"
-            f"{'━' * 28}\n\n"
-            "You've been verified and approved to join our exclusive gold signals group.\n\n"
-            f"👉 <b>Join the group:</b> {invite_link}\n\n"
-            "📖 Our trading guide will be sent to you shortly.\n\n"
-            "Remember:\n"
-            "• Follow the signals discipline\n"
-            "• Never risk more than you can afford\n"
-            "• Gold is volatile — trust the system\n\n"
-            f"Let's make money together! 🥇\n"
-            f"{'━' * 28}\n"
-            f"{PLATFORM_NAME}"
-        ))
+        if invite_link:
+            # Send approval with group link
+            send_message(int(user_id), (
+                f"🎉 <b>APPROVED! Welcome to {PLATFORM_NAME}!</b>\n"
+                f"{'━' * 28}\n\n"
+                "You've been verified and approved to join our exclusive gold signals group.\n\n"
+                f"👉 <b>Join the group:</b> {invite_link}\n\n"
+                "📖 Our trading guide will be sent to you shortly.\n\n"
+                "Remember:\n"
+                "• Follow the signals discipline\n"
+                "• Never risk more than you can afford\n"
+                "• Gold is volatile — trust the system\n\n"
+                f"Let's make money together! 🥇\n"
+                f"{'━' * 28}\n"
+                f"{PLATFORM_NAME}"
+            ))
+            name = user.get("name", "Unknown")
+            send_message(admin_chat_id, f"✅ {name} ({user_id}) has been approved and notified with group link.")
+        else:
+            # No invite link available — notify admin
+            send_message(int(user_id), (
+                f"🎉 <b>APPROVED! Welcome to {PLATFORM_NAME}!</b>\n"
+                f"{'━' * 28}\n\n"
+                "You've been verified! Our admin will send you the group invite link shortly.\n\n"
+                f"{'━' * 28}\n"
+                f"{PLATFORM_NAME}"
+            ))
+            name = user.get("name", "Unknown")
+            send_message(admin_chat_id, (
+                f"⚠️ {name} ({user_id}) approved but <b>GROUP_INVITE_LINK is not set!</b>\n"
+                f"Set it in Streamlit secrets or send the link manually to user {user_id}."
+            ))
 
-        name = user.get("name", "Unknown")
-        send_message(admin_chat_id, f"✅ {name} ({user_id}) has been approved and notified.")
-        logger.info(f"User approved: {name} ({user_id})")
+        logger.info(f"User approved: {user.get('name', 'Unknown')} ({user_id})")
 
     def reject_user(self, admin_chat_id, user_id, reason=""):
         """Admin rejects a user."""
@@ -660,12 +713,15 @@ class CommandHandler:
 
         # Handle photo uploads (proof screenshots)
         if message.get("photo"):
-            self.onboarding.handle_photo(chat_id, user_id, first_name, username)
+            # Telegram sends multiple sizes — get the largest
+            file_id = message["photo"][-1]["file_id"]
+            self.onboarding.handle_photo(chat_id, user_id, first_name, username, file_id=file_id)
             return
 
         # Handle document uploads (proof files)
         if message.get("document"):
-            self.onboarding.handle_photo(chat_id, user_id, first_name, username)
+            file_id = message["document"].get("file_id")
+            self.onboarding.handle_photo(chat_id, user_id, first_name, username, file_id=file_id)
             return
 
         text = message.get("text", "").strip()
